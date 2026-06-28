@@ -6,6 +6,7 @@ Learning record / study project for [vLLM](https://github.com/vllm-project/vllm)
 
 - **Just started.** Repo has a single initial commit (README, LICENSE, `.gitignore`).
 - `third_party/` contains upstream repos as git submodules (shallow, `--depth 1`) for study.
+- `notes/`, `examples/`, `experiments/` directories are ready for personal work.
 - No custom Python/C++ code, no build config, no tests yet.
 - The `.gitignore` was generated from a Rust template — expect it to be updated as Python artifacts (`__pycache__`, `*.pyc`, `venv/`, `.egg-info/`, `dist/`) are added.
 
@@ -23,8 +24,12 @@ vllm-learning/
 ├── .gitmodules         # submodule index
 ├── third_party/        # upstream repo submodules for study
 │   ├── vllm/           # https://github.com/vllm-project/vllm (submodule, --depth 1)
-│   └── vllm-ascend/    # https://github.com/vllm-project/vllm-ascend (submodule, --depth 1)
-└── ...                 # your own notes / experiments go here
+│   ├── vllm-ascend/    # https://github.com/vllm-project/vllm-ascend (submodule, --depth 1)
+│   └── vllm-cloud-main/ # https://github.com/huaweicloud/ModelArts-Lab branch:vllm/vllm-cloud-main (submodule, --depth 1)
+├── notes/              # study notes, architecture docs
+├── examples/           # your own example scripts using vLLM API
+├── experiments/        # deeper experiments, custom modifications
+└── ...                 # more as needed
 ```
 
 ## Commands
