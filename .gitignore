@@ -22,3 +22,6 @@ target
 
 .opencode/
 .vscode/
+
+# Draw.io drafts (not ready for version control)
+_drafts/
