@@ -2,14 +2,6 @@
 
 Learning record / study project for [vLLM](https://github.com/vllm-project/vllm) — the high-throughput LLM serving engine (Python, C++, CUDA).
 
-## Status
-
-- **Just started.** Repo has a single initial commit (README, LICENSE, `.gitignore`).
-- `third_party/` contains upstream repos as git submodules (shallow, `--depth 1`) for study.
-- `notes/`, `examples/`, `experiments/` directories are ready for personal work.
-- No custom Python/C++ code, no build config, no tests yet.
-- The `.gitignore` was generated from a Rust template — expect it to be updated as Python artifacts (`__pycache__`, `*.pyc`, `venv/`, `.egg-info/`, `dist/`) are added.
-
 ## What this repo is for
 
 - Studying vLLM internals: architecture, batching, KV cache management, tensor parallelism, PagedAttention, continuous batching.
@@ -26,7 +18,7 @@ vllm-learning/
 │   ├── vllm/           # https://github.com/vllm-project/vllm (submodule, --depth 1)
 │   ├── vllm-ascend/    # https://github.com/vllm-project/vllm-ascend (submodule, --depth 1)
 │   └── vllm-cloud-main/ # https://github.com/huaweicloud/ModelArts-Lab branch:vllm/vllm-cloud-main (submodule, --depth 1)
-├── notes/              # study notes, architecture docs
+├── notes/              # study notes, architecture docs (LEARNING_ROADMAP.md = live progress)
 ├── examples/           # your own example scripts using vLLM API
 ├── experiments/        # deeper experiments, custom modifications
 └── ...                 # more as needed
@@ -46,16 +38,21 @@ pip install -e third_party/vllm
 pip install -e third_party/vllm-ascend
 ```
 
-## Repository conventions
+## Hard rules
 
-- No monorepo or multi-package structure — flat learning project.
-- README is intentionally minimal (`# vllm-learning\nvllm learning record`).
-- MIT licensed.
+- **Do NOT modify files inside `third_party/`** — upstream submodules for reference only. If an experiment needs vLLM source changes, copy the files out first.
+- This is a personal study sandbox, not a vLLM fork or production deployment.
+- Learning counts only when the user **personally reads source code** and can explain it. Assistant-driven explanations don't count until verified by reading.
+- Prefer: one small code path at a time, quick explanation of blockers, immediate return to code.
 
-## For future agents
+## Learning progress
 
-- This is not a vLLM fork or production deployment — it's a **personal study sandbox**.
-- The user is Edge51 (liuyuanyuanedge@163.com) — working from `/home/Edge51/Projects/vllm-learning`.
-- Do NOT modify files inside `third_party/` — those are upstream submodules for reference only.
-- Changes to `.gitignore` are expected as the project accumulates Python artifacts.
-- If learning experiments need vLLM source changes, copy the relevant files out of `third_party/` first.
+- **Live progress** (phases, next step): `notes/LEARNING_ROADMAP.md`
+- **Notes index**: `notes/*.md` — one file per topic (request flow, scheduler, function call, distributed inference, etc.)
+- **Interview prep** (Phase 7): `notes/07-interview-prep.md`
+
+## Environment
+
+- Python 3.14 on host — incompatible with vLLM (needs 3.10-3.12)
+- Workaround: miniconda env `vllm` with Python 3.12
+- GPU: RTX 4060 Ti 8GB
