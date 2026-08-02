@@ -27,63 +27,48 @@
 ## 📍 当前位置
 
 ```
-P0 [████████░░] 基本完成  请求处理流程、引擎主循环 step()
-P1 [██████░░░░] 进行中    Prefill/Decode 区分、KV cache
-P2 [░░░░░░░░░░] 未开始    PagedAttention 与显存管理
-P3 [░░░░░░░░░░] 未开始    连续批处理与调度细节
-P4 [░░░░░░░░░░] 未开始    深入 function call
-P5 [░░░░░░░░░░] 未开始    分布式推理
-P6 [░░░░░░░░░░] 未开始    Ascend 适配与 CANN
-P7 [░░░░░░░░░░] 未开始    面试准备与实战
+P0 [████████░░] ✅  请求处理流程、引擎主循环 step()
+P1 [████████░░] ✅  Prefill/Decode 区分、KV cache 概念
+P2 [████████░░] ✅  PagedAttention、block table、block 生命周期
+P3 [████████░░] ✅  连续批处理与调度细节
+P4 [█████████░] 🔧  function call（主干+核心算法+共享状态已覆盖）
+P5 [██░░░░░░░░] 🔧  分布式推理（组拓扑+TP实现已覆盖）
+P6 [░░░░░░░░░░] ❌  Ascend 适配与 CANN
+P7 [░░░░░░░░░░] ❌  面试准备与实战
 ```
 
-下一站：**Phase 2 — PagedAttention**
+下一站：**Phase 5 — 分布式推理（组拓扑 + TP 实现 ✅，PP / 通信原语 / EP 待学）**
 
 ---
 
-## Phase 0：先搞懂你在维护什么（1-2 天）✅ 基本完成
-
-不用急着补理论，先从你每天都在接触的东西开始。
+## Phase 0：先搞懂你在维护什么 ✅ 已完成
 
 ### 学习目标
 
-能画出 vLLM 处理一次请求的**完整流程图**，从 HTTP 请求进来到响应出去。
+画出 vLLM 处理一次请求的完整流程图，从 HTTP 请求进来到响应出去。
 
-### 核心问题
+### 已覆盖内容
 
-带着这些问题去读代码：
+- API Server（entrypoints/openai/api_server.py）接收请求
+- Chat 请求处理（serving_chat.py → jinja 模板渲染）
+- Tokenize → Scheduler → EngineCore.step() 主循环
+- ModelRunner 执行 → 采样 → Detokenize → 响应
 
-1. 用户发来的请求体长什么样？vLLM 在哪里接收的？
-2. function call 的 tools 信息是怎么塞进 prompt 的？（jinja 渲染）
-3. 模型输出的文本怎么被识别为 function call？（tool_parser）
-4. 最终响应是怎么组装回去的？
-
-### 代码漫游路径
+### 代码漫游路径（v1，实际文件路径）
 
 ```
-third_party/vllm/vllm/entrypoints/       # API 入口
-third_party/vllm/vllm/entrypoints/openai/  # OpenAI 兼容 API
-  └─ api_server.py                        # HTTP 服务入口
-  └─ serving_chat.py                      # chat 请求处理
-third_party/vllm/vllm/entrypoints/llm.py  # LLM 类（离线推理入口）
-third_party/vllm/vllm/transformers/       # tokenizer、detokenizer
+third_party/vllm/vllm/v1/engine/core.py        # EngineCore.step() 主循环
+third_party/vllm/vllm/v1/engine/core.py        # EngineCoreOutput 输出处理
+third_party/vllm/vllm/v1/serial_utils.py        # 序列化/反序列化
 ```
 
-function call 相关（大概率在 ascend-vLLM 或 ModelArts-Lab patch 里）：
+### 相关笔记
 
-```
-第三_party/vllm-ascend/                    # ascend 适配层
-third_party/vllm-cloud-main/              # 华为云 patch
-  └─ 搜索 jinja / tool_parser / function_call
-```
-
-### 🗣 费曼检查点
-
-> "当我用 OpenAI SDK 调一个 chat completion 请求时，vLLM 从收到请求到返回，中间经历了哪些步骤？画出流程图。"
+- `notes/00-request-flow.md` — 请求处理流程图与代码对照
 
 ---
 
-## Phase 1：LLM 推理基础（3-5 天）🔄 进行中
+## Phase 1：LLM 推理基础 ✅ 已完成
 
 ### 学习目标
 
@@ -123,157 +108,189 @@ third_party/vllm/vllm/attention/             # attention 后端
 
 在 `examples/` 下写一个脚本：`pip install vllm` 后，用 vLLM 跑一次离线推理，打印出每步生成的 token 和 logits。
 
+### 相关笔记
+
+- `notes/01-prefill-decode-basics.md` — Prefill/Decode 对比与 KV Cache 解释
+
 ### 🗣 费曼检查点
 
 > "用最通俗的话讲，Transformer 是怎么一个字一个字写出回答的？prefill 和 decode 有什么区别？KV cache 存了什么、为什么能加速？"
 
 ---
 
-## Phase 2：vLLM 核心架构 — PagedAttention 与显存管理（3-5 天）
+## Phase 2：vLLM 核心架构 — PagedAttention 与显存管理 ✅ 已完成
 
 ### 学习目标
 
 - 理解 PagedAttention 的核心思想：操作系统的分页思想用在 KV cache 上
-- 理解 Block Manager 怎么管理显存
-- 理解物理块和逻辑块的概念
+- 理解逻辑块和物理块通过 block table 映射
+- 理解 Block 的完整生命周期：分配 → 使用 → 释放
 
-### 核心问题
+### 已覆盖内容
 
-1. 传统 KV cache 有什么问题？（显存碎片、预分配浪费）
-2. PagedAttention 怎么解决这些问题？
-3. 一个请求的 KV cache 是怎么从逻辑块映射到物理块的？
-4. Block table 是什么？什么时候更新？
-5. Copy-on-write 在什么场景下发生？
+- **逻辑 block vs 物理 block**：逻辑连续性由 list 下标保证，物理 block_id 可以不连续
+- **Block table**：`single_type_kv_cache_manager.py:73` `req_to_blocks: dict[str, list[KVCacheBlock]]`
+- **分配链路**：`scheduler.allocate_slots()` → `KVCacheManager.allocate_slots()` → `coordinator.allocate_new_blocks()` → `SingleTypeKVCacheManager.allocate_new_blocks()` → `block_pool.get_new_blocks()` → `FreeKVCacheBlockQueue.popleft_n()`
+- **释放链路**：`scheduler._preempt_request()` → `kv_cache_manager.free()` → `SingleTypeKVCacheManager.free()` → `block_pool.free_blocks()` → `FreeKVCacheBlockQueue.append_n()`
+- **ref_cnt**：分配时 +1，释放时 -1，ref_cnt == 0 才回 free list
+- **KVCacheBlock**（`kv_cache_utils.py:114`）：block_id、ref_cnt、双向链表指针
+- **prefix cache 共享**：多个 request 可共享同一 block，ref_cnt > 1
+- **1024 token 示例**：16 block_size → 64 blocks，preempt 时全部回 free list
 
-### 学习内容
-
-| 顺序 | 主题 | 建议资源 |
-|---|---|---|
-| 1 | PagedAttention 论文 → 重点读 3-4 节 | [vLLM 论文](https://arxiv.org/abs/2309.06180) |
-| 2 | 官方 blog 文章 | [vLLM: PagedAttention 介绍](https://blog.vllm.ai/2023/06/20/vllm.html) |
-| 3 | 显存管理概览 | vLLM 文档的显存部分 |
-
-### 代码漫游路径
+### 关键代码路径
 
 ```
-third_party/vllm/vllm/core/                 # vLLM 核心逻辑
-  └─ block_manager.py                        # 块管理器 ⭐
-  └─ block_table.py                          # 块表管理
-  └─ block.py                                # 块的数据结构
-
-third_party/vllm/vllm/worker/
-  └─ cache_engine.py                         # KV cache 分配
-
-third_party/vllm/csrc/attention/            # CUDA kernel（先看接口）
-  └─ attention_kernel.cuh                    # PagedAttention kernel
+third_party/vllm/vllm/v1/core/block_pool.py
+  └─ BlockPool (line 130)
+  └─ get_new_blocks() (line 322)
+  └─ free_blocks() (line 408)
+third_party/vllm/vllm/v1/core/single_type_kv_cache_manager.py
+  └─ SingleTypeKVCacheManager (line 30)
+  └─ allocate_new_blocks() (line 242)
+  └─ free() (line 303)
+third_party/vllm/vllm/v1/core/kv_cache_utils.py
+  └─ KVCacheBlock (line 114)
+  └─ FreeKVCacheBlockQueue (line 162)
+third_party/vllm/vllm/utils/math_utils.py
+  └─ cdiv() (line 10)
 ```
 
-### 🧪 动手实验
+### 相关笔记
 
-计算一下：使用 Llama-7B（层数 32，hidden_size 4096，FP16），batch_size=4，max_seq_len=4096，KV cache 需要多少显存？
+- `notes/02-block-lifecycle.md` — Block 生命周期完整追踪
 
 ### 🗣 费曼检查点
 
-> "PagedAttention 是什么？它和操作系统的虚拟内存有什么相似之处？Block table 是怎么起作用的？"
+> "PagedAttention 是什么？逻辑 block 和物理 block 怎么映射？一个 1024 token 的请求 prefill 时分配了多少 block？preempt 时 block 去了哪里？"
 
 ---
 
-## Phase 3：调度与批处理（3-5 天）
+## Phase 3：调度与批处理 ✅ 已完成
 
 ### 学习目标
 
-- 理解 Continuous Batching（持续批处理）是什么、为什么重要
-- 理解 vLLM 调度器的工作原理
-- 理解 prefill 和 decode 怎么被调度
+- 理解 Continuous Batching 的核心机制
+- 理解 vLLM v1 调度器的三个队列（Running / Resumed / Waiting）和 token budget 分配
+- 理解 Chunked Prefill 的原理和配置
 
-### 核心问题
+### 已覆盖内容
 
-1. 没有连续批处理的时候，vLLM 是怎么做推理的？
-2. 连续批处理允许"中途插队"——新的请求进来时，正在跑的 batch 怎么办？
-3. 调度器怎么决定当前这步应该跑 prefill 还是 decode？
-4. 什么是 chunked prefill？为什么需要它？
-5. 什么是 max_num_seqs、max_model_len？它们怎么影响调度？
+- **Scheduler 哲学**：没有 prefill/decode 分支，只有 `num_new_tokens` 的差值计算
+- **Running 队列调度**（`scheduler.py:387-522`）：遍历 running，算 `num_new_tokens`，分配 KV cache，不够踢人
+- **Waiting 队列调度**（`scheduler.py:567-840`）：新请求首次分配，prefix cache 匹配，`long_prefill_token_threshold` 截断
+- **Preemption**（`scheduler.py:965-985`）：踢人 → `kv_cache_manager.free()` → 放回 waiting
+- **Token Budget**：三个阶段共享同一个 `token_budget`，Running 优先
+- **Chunked Prefill**：`long_prefill_token_threshold` 限制单个 request 每步 prefill 上限，`enable_chunked_prefill` 控制是否允许分批
+- **Block 生命周期**：`block_pool.get_new_blocks()` → `FreeKVCacheBlockQueue.popleft_n()`；释放走 `free_blocks()` → `append_n()`，ref_cnt 控制是否回 pool
+- **配置项**（`config/scheduler.py`）：`max_num_batched_tokens`、`max_num_seqs`、`long_prefill_token_threshold`、`enable_chunked_prefill`
+- **执行链路**（`gpu_model_runner.py:3787-4116`）：_update_states → _prepare_inputs → _preprocess → _model_forward → compute_logits
 
-### 学习内容
+### 关键代码路径
 
-| 顺序 | 主题 |
+```
+# v1 调度器（vllm v0.20.2）
+third_party/vllm/vllm/v1/core/sched/scheduler.py
+  └─ schedule() (line 352)                     # 主入口
+  └─ _preempt_request() (line 965)             # 踢人
+  └─ _free_request() (line 1826)               # 完成释放
+
+# KV cache 管理
+third_party/vllm/vllm/v1/core/block_pool.py
+  └─ BlockPool.get_new_blocks() (line 322)     # 分配
+  └─ BlockPool.free_blocks() (line 408)        # 释放
+third_party/vllm/vllm/v1/core/single_type_kv_cache_manager.py
+  └─ allocate_new_blocks() (line 242)          # 计算 + 调 get_new_blocks
+  └─ free() (line 303)                         # pop + 调 free_blocks
+third_party/vllm/vllm/v1/core/kv_cache_utils.py
+  └─ FreeKVCacheBlockQueue (line 162)          # 空闲块双向链表
+
+# 配置
+third_party/vllm/vllm/config/scheduler.py
+  └─ SchedulerConfig (line 26)
+
+# 模型执行
+third_party/vllm/vllm/v1/worker/gpu_model_runner.py
+  └─ execute_model() (line 3787)
+```
+
+### 相关笔记
+
+- `notes/02-block-lifecycle.md` — 1024 seq_len 请求的 block 完整生命周期（P2，与调度相关）
+- `notes/03-scheduler-knowledge-map.md` — Scheduler 架构知识地图
+
+### 🗣 费曼检查点
+
+> "连续批处理解决了什么问题？调度器里没有 if prefill / if decode 分支，那 prefill 和 decode 的本质区别是什么？token_budget 是怎么在多个 request 之间分配的？"
+
+---
+
+## Phase 4：深入 function call 🔧 主链路 + 核心算法已完成
+
+### 学习目标（已达成）
+
+- ✅ 从源码层面理解 function call 的完整实现
+- ✅ 理解 jinja 模板的作用和渲染时机
+- ✅ 理解 tool_parser 的实现（包括 JSON Schema 和 XML 两种路径）
+- ✅ 能定位和修复 function call 相关的问题
+- ✅ 理解投机解码对 tool parser 的影响
+- ✅ 理解 `extract_tool_call_required_streaming` 算法 + `partial_json_loads` 配合
+- ✅ 理解 `_parse_tool_calls_from_content` 非流式 5 分支决策树
+- ✅ 理解 `_filter_delta_text` bracket 过滤机制
+- ✅ 理解 `make_tool_call_id` 的两种格式和 `finish_reason` 分支逻辑
+- ✅ 理解 `prev_tool_call_arr` / `streamed_args_for_tool` 共享状态设计
+
+### 已覆盖内容
+
+详细内容见 `notes/04-function-call.md`（§1-13 全链路分析）和 `notes/04-streaming-branches.md`（流式分支架构）。
+
+核心链路：
+
+```
+create_chat_completion()
+  └→ render_chat_request()    → jinja 渲染 messages+tools → prompt
+      └→ preprocess_chat()
+          ├→ reasoning_parser.adjust_request()
+          └→ tool_parser.adjust_request()   → 设置 structured_outputs / skip_special_tokens
+  └→ engine_client.generate() → AsyncLLM → EngineCore
+  └→ (stream) chat_completion_stream_generator()
+      ├→ tool_parser.extract_tool_calls_streaming()  ← XML parser 逐 token 解析
+      └→ extract_tool_call_required_streaming()      ← required/named JSON 路径
+  └→ (non-stream) chat_completion_full_generator()
+      └→ _parse_tool_calls_from_content()            ← 5 分支决策树
+```
+
+### 关键发现
+
+| 主题 | 要点 |
 |---|---|
-| 1 | 连续批处理概念（先看这篇经典博客） |
-| 2 | vLLM 调度器设计 |
-| 3 | Chunked prefill 的引入原因 |
+| **Jinja 渲染** | vLLM 侧只加载模板字符串；真正编译执行在 HuggingFace `apply_chat_template()` |
+| **adjust_request** | 是 **pre-processing**（改请求参数），不是后处理 |
+| **JSON Schema** | `tool_choice="required"` 时构建，约束模型输出 JSON 格式 |
+| **投机解码影响** | `delta_text` 批量化 → XML 状态机容易不同步 |
+| **无状态解析** | JSON 格式（`partial_json_loads`）天然不受投机影响 |
+| **技术债** | Mistral / Harmony 的 `if/else` 散落主线，可读性差 |
+| **_filter_delta_text** | bracket level 扫描，过滤末尾不完整 JSON fragment，解决 spec-decode 截断问题 |
+| **non-streaming 5 分支** | `_parse_tool_calls_from_content` 按 tool_choice + 是否有 parser + finish_reason 决策 |
+| **make_tool_call_id** | 两种格式：`call_<uuid>` 或 `functions.<name>:<idx>` |
+| **finish_reason 转换** | named tool_choice 时 `"tool_calls"` → `"stop"`（对客户端透明） |
 
-### 代码漫游路径
+### 影响 function call 的特性清单
 
-```
-third_party/vllm/vllm/core/scheduler.py     # 调度器 ⭐
-  └─ schedule()                              # 主调度逻辑
-  └─ _schedule_prefills()                    # prefill 调度
-  └─ _schedule_decodes()                     # decode 调度
+| 特性 | 等级 | 说明 |
+|---|---|---|
+| Speculative decoding | 🔴 高 | delta_text 批量化，XML parser 状态机不同步 |
+| 并行 tool call | 🔴 高 | 多 tool call 边界管理 |
+| Reasoning + tool 混合 | 🔴 高 | 两个 parser 共享 delta_message 流 |
+| Grammar/Guided decoding | 🔴 高 | 约束格式必须和 parser 一致 |
+| Chunked prefill | 🟡 中 | 空 delta 处理 |
+| n > 1 | 🟡 中 | 多 choice 独立状态 |
+| Multi-modal | 🟡 中 | 多模态 token 穿插 |
+| EOS 处理 | 🟡 中 | 截断处理 |
 
-third_party/vllm/vllm/v1/                   # v1 调度器（更新版本）
-  └─ engine/
-    └─ scheduler.py
+### 相关笔记
 
-third_party/vllm/vllm/config.py
-  └─ SchedulerConfig                         # 调度器配置
-```
-
-### 🗣 费曼检查点
-
-> "连续批处理解决了什么问题？调度器在每次 step 时怎么决定跑哪个请求的哪个阶段？"
-
----
-
-## Phase 4：深入 function call（2-3 天）🔧
-
-回到你的日常工作中，用前面学到的整体视角重新审视。
-
-### 学习目标
-
-- 从源码层面理解 function call 的完整实现
-- 理解 jinja 模板的作用和渲染时机
-- 理解 tool_parser 的实现
-- 能定位和修复 function call 相关的问题
-
-### 核心问题
-
-1. OpenAI 的 function calling API 格式是什么样的？vLLM 怎么兼容的？
-2. tools 参数怎么被渲染进 prompt 的？jinja 模板在哪？
-3. 模型怎么知道应该输出 tool call？停词（stop tokens）怎么控制？
-4. tool_parser 解析模型输出时，怎么处理多个 tool call？
-5. ascend-vLLM 对这个流程有没有改动？改了什么？
-
-### 代码漫游路径
-
-```
-# 先找入口
-third_party/vllm/vllm/entrypoints/openai/
-  └─ protocol.py                             # API 协议定义
-  └─ serving_chat.py                         # chat 处理
-
-# 再找模板和解析
-third_party/vllm/vllm/entrypoints/llm.py     # 离线推理也涉及
-
-# 模型侧的 tokenizer
-third_party/vllm/vllm/transformers/
-  └─ tokenizer.py                            # tokenizer 加载
-
-# ascend 差异
-third_party/vllm-ascend/
-  └─ (搜索 function_call, tool 相关代码)
-
-third_party/vllm-cloud-main/
-  └─ (搜索 patch 中的 function call 改动)
-```
-
-### 🧪 动手实验
-
-1. 用一个支持 function calling 的模型，构造一个包含 tools 的请求，抓包看实际发送给模型的 prompt 是什么
-2. 修改 tool_parser，加一行日志打印解析结果
-
-### 🗣 费曼检查点
-
-> "一个 function call 请求从 API 进来到响应出去，tools 信息经过了什么变换？jinja 和 tool_parser 分别在什么时候做了什么？"
+- `notes/04-function-call.md` — 完整 Phase 4 学习文档（§1-14）
+- `notes/04-streaming-branches.md` — 流式分支架构（3 分类 + 决策树）
 
 ---
 

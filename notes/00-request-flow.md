@@ -1,10 +1,39 @@
-# Session 1 回顾：从请求到模型执行
+# Phase 0: vLLM 请求处理流程
 
-学习日期：2026-06-28
+```mermaid
+flowchart LR
+    A["HTTP 请求<br>（包含 tools）"] --> B["jinja 渲染<br>（tools → prompt 模板）"]
+    B --> C["tokenize<br>（文本 → token IDs）"]
+    C --> D["加入调度队列"]
+    D --> E["scheduler 调度<br>（资源检查 + 选请求）"]
+    E --> F{"新请求？"}
+    F -->|是| G["prefill<br>批量计算 KV cache"]
+    F -->|否| H["decode<br>逐 token 生成"]
+    G --> I["post_process<br>（收集输出 token）"]
+    H --> I
+    I --> J{"生成完成？<br>（eos / max_tokens）"}
+    J -->|否| E
+    J -->|是| K["detokenize<br>（token IDs → 文本）"]
+    K --> L["API 层组装响应"]
+    L --> M["返回客户端"]
 
-## 你理解了什么？
+    style A fill:#e1f5fe
+    style M fill:#c8e6c9
+    style E fill:#fff3e0
+    style G fill:#f3e5f5
+    style H fill:#f3e5f5
+```
 
-### 1. vLLM 的完整请求链路
+## 各环节对应代码
+
+| 环节 | 文件 |
+|---|---|
+| API 入口 | `vllm/entrypoints/openai/api_server.py` |
+| 引擎主循环 | `vllm/v1/engine/core.py` |
+| 调度器 | `vllm/v1/core/sched/scheduler.py` |
+| 模型执行 | `vllm/v1/worker/gpu/model_runner.py` |
+
+## 完整请求链路（Session 1 回顾）
 
 ```
 请求进来
@@ -19,20 +48,7 @@
   → 返回结果
 ```
 
-### 2. Prefill vs Decode
-| | Prefill | Decode |
-|---|---|---|
-| 何时发生 | 请求第一次进入 | 已有 KV cache 后 |
-| 计算量 | 大量（并行算所有 token 的 KV） | 小（只算 1 个新 token） |
-| GPU 用途 | 矩阵乘法（计算密集型） | 显存读取（带宽密集型） |
-| `num_scheduled_tokens` | > 1（通常几百） | = 1 |
-
-### 3. KV Cache
-- 缓存的是每层 attention 的 **K 和 V**（不是 Q）
-- 一旦算好，后续 decode 直接读取，不用重算
-- Q 每轮都变，不能缓存
-
-### 4. 代码组织
+## 代码组织
 
 ```
 请求入口
@@ -51,7 +67,7 @@ Attention 后端（根据 query_len 隐式区分 prefill/decode）
   vllm/v1/attention/backends/flash_attn.py
 ```
 
-### 5. Prefill/Decode 的"隐式传递"
+## Prefill/Decode 的"隐式传递"
 
 scheduler 到 model_runner 之间没有 `if is_prefill` 这样的标签。
 
@@ -68,13 +84,3 @@ model_runner: max_query_len = max(512, 1)
 attention 后端: query_len = 512 → 调 prefill kernel
                 query_len = 1   → 调 decode kernel
 ```
-
-## 你学会了什么技能
-
-| 技能 | 下次用在哪 |
-|---|---|
-| `F12` 跳类型定义 | 任何 Python 项目 |
-| 参数的值找调用方（搜调用点） | 任何带依赖注入的代码 |
-| `type[Executor]` = 传类本身 | Python 工厂模式 |
-| 动态字符串加载 `F12` 跳不动 → 搜 config 默认值 | 框架代码 |
-| `git submodule` 切换版本分支 | ascend-vLLM 版本管理 |
