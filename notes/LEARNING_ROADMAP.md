@@ -32,12 +32,12 @@ P1 [████████░░] ✅  Prefill/Decode 区分、KV cache 概念
 P2 [████████░░] ✅  PagedAttention、block table、block 生命周期
 P3 [████████░░] ✅  连续批处理与调度细节
 P4 [█████████░] 🔧  function call（主干+核心算法+共享状态已覆盖）
-P5 [██░░░░░░░░] 🔧  分布式推理（组拓扑+TP实现已覆盖）
+P5 [███████░░░] 🔧  分布式推理（全部已读，**待复述验证掌握度**）
 P6 [░░░░░░░░░░] ❌  Ascend 适配与 CANN
 P7 [░░░░░░░░░░] ❌  面试准备与实战
 ```
 
-下一站：**Phase 5 — 分布式推理（组拓扑 + TP 实现 ✅，PP / 通信原语 / EP 待学）**
+下一站：**Phase 5 收尾（通信原语细读 + 配置案例）→ Phase 6 Ascend，或从面试清单复述开始**
 
 ---
 
@@ -294,7 +294,7 @@ create_chat_completion()
 
 ---
 
-## Phase 5：分布式推理（3-5 天）
+## Phase 5：分布式推理（3-5 天）🔄 进行中
 
 ### 学习目标
 
@@ -304,38 +304,55 @@ create_chat_completion()
 
 ### 核心问题
 
-1. 一个 70B 模型大概占多少显存？一张 A100 80GB 能放下吗？
-2. Tensor parallelism 是怎么把一个 transformer 层切到多张卡上的？
-3. Pipeline parallelism 又是什么？它和 tensor parallelism 有什么区别？
-4. vLLM 用哪种并行方式？什么时候需要？
-5. 多卡通信是怎么做的？（NCCL？CANN 对应的通信库是什么？）
+1. 一个 70B 模型大概占多少显存？一张 A100 80GB 能放下吗？ — ✅ 已答（140GB，放不下）
+2. Tensor parallelism 是怎么把一个 transformer 层切到多张卡上的？ — ✅ 已答（列切/行切 + all-reduce）
+3. Pipeline parallelism 又是什么？它和 tensor parallelism 有什么区别？ — ✅ 已答（PP 分层传激活，TP 切参数）
+4. vLLM 用哪种并行方式？什么时候需要？ — ✅ 已答（TP×PP×EP 组合，看模型/显存）
+5. 多卡通信是怎么做的？（NCCL？CANN 对应的通信库是什么？） — ⚠️ 部分（collective_rpc/MQ 已读，NCCL/CANN 细节待补）
+6. 🔧 多卡执行流：EngineCore.step() 怎么把调度结果派发给所有 worker？ — ✅ 已答（collective_rpc → MQ）
+7. 🔧 Disaggregated Prefill/Decode 和 PP 有什么区别？Mooncake 怎么传 KV cache？ — ✅ 已答（RDMA 传完整 KV）
 
 ### 学习内容
 
-| 顺序 | 主题 |
-|---|---|
-| 1 | 模型并行 vs 数据并行 vs 流水线并行 |
-| 2 | Tensor parallelism（Megatron-LM 的分片方式） |
-| 3 | vLLM 的分布式实现 |
+| 顺序 | 主题 | 状态 |
+|---|---|---|
+| 1 | 模型并行 vs 数据并行 vs 流水线并行 | ✅ |
+| 2 | Tensor parallelism（Megatron-LM 的分片方式） | ✅ |
+| 3 | vLLM 的分布式实现（组拓扑） | ✅ |
+| 4 | Pipeline Parallel + AsyncIntermediateTensors | ✅ |
+| 5 | MoE / Expert Parallel（SparseMoeBlock 入口） | ✅ |
+| 6 | AsyncLLM 多卡执行流（collective_rpc/MQ/Worker） | ✅ |
+| 7 | Disaggregated Prefill/Decode（Mooncake） | ✅ |
+| 8 | 通信原语细读（communication_op.py） | ❌ 待学 |
+| 9 | 多卡配置案例（实际部署怎么选 TP/PP/EP） | ❌ 待学 |
 
 ### 代码漫游路径
 
 ```
 third_party/vllm/vllm/distributed/          # 分布式基础设施
-  └─ parallel_state.py                       # 并行状态管理
-  └─ comms.py                                # 通信接口
+  └─ parallel_state.py                       # 并行状态管理（5D 组拓扑、isend/irecv）
+  └─ comms.py / communication_op.py          # 通信接口（部分）
+  └─ elastic_ep/                             # 弹性 Expert Parallel（待学）
 
-third_party/vllm/vllm/worker/
-  └─ worker.py                               # 单卡工作者
-  └─ multi_step_worker.py                    # 多卡工作者
+third_party/vllm/vllm/v1/executor/
+  └─ multiproc_executor.py                   # collective_rpc → MQ 派发（✅ 已读:306/339）
 
-third_party/vllm/vllm/config.py
-  └─ ParallelConfig                          # 并行配置
+third_party/vllm/vllm/v1/worker/
+  └─ gpu_worker.py                           # GPUWorker.execute_model（✅ 已读:753）
+  └─ kv_connector_model_runner_mixin.py      # Mooncake 拉取 KV（✅ 已读:102）
+
+third_party/vllm/vllm/distributed/kv_transfer/
+  └─ kv_connector/v1/mooncake/mooncake_connector.py   # MooncakeConnector（✅ 已读:461/703/978）
+  └─ kv_connector/v1/base.py                 # KVConnectorBase_V1 抽象
+
+third_party/vllm/vllm/model_executor/layers/
+  └─ fusions/fused_moe/                      # FusedMoE kernel 层（待学）
 ```
 
 ### 🗣 费曼检查点
 
 > "如果模型太大放不进一张 GPU，怎么用多张卡来跑推理？Tensor parallelism 和 pipeline parallelism 各自怎么切分计算？"
+> → 已学待复述（见 07-interview-prep.md 题 9-16）
 
 ---
 

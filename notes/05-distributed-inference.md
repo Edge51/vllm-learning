@@ -1,7 +1,8 @@
 # Phase 5：分布式推理 — 知识地图
 
-> 学习日期: 2026-07-15
-> 状态: 组拓扑 ✅ | TP 实现 ✅ | PP / 通信原语 / EP / Worker / 配置案例 ❌
+> 学习日期: 2026-07-15 ~ 2026-08-02
+> 状态: 全部为"已读（走过一遍）"，**待用户复述验证**。掌握程度未确认，勿当作已学。
+> 阅读覆盖: 组拓扑 ✅ | TP 实现 ✅ | PP ✅ | EP ✅ | AsyncLLM 执行流 ✅ | Mooncake Disagg ✅ | 通信原语（部分）| 配置案例 ❌
 
 ---
 
@@ -38,6 +39,94 @@
 
 ---
 
+### 2026-08-02: 模型层并行实现（Qwen2 源码）
+
+**理解了什么**:
+- Qwen2Model 骨架：embed_tokens → DecoderLayer×N → norm → hidden_states
+- Qwen2DecoderLayer：input_layernorm → attention → post_attention_layernorm → MLP（residual 融合在 RMSNorm 里）
+- Qwen2MLP：MergedColumnParallelLinear(hidden→gate+up) → SiluAndMul → RowParallelLinear(all-reduce)
+- ColumnParallelLinear：output_dim（dim=0）切分，weight_loader 用 `narrow(output_dim, tp_rank * shard_size, shard_size)`
+- RowParallelLinear：input_dim（dim=1）切分，all-reduce 合并部分和
+- QKVParallelLinear：按 head 级别切分（不是连续 dim），保持 head 完整性
+- RMSNorm：per-token 沿 hidden_size 归一化；residual 融合 `x + residual`
+- SiluAndMul：`silu(x[:d]) * x[d:]`（SwiGLU 门控），不是 GeLU
+- Attention backend 选择：platform.get_valid_backends → 优先级列表 → 第一个通过 validate_configuration 的
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| （待补） | |
+| （待补） | |
+
+**下次入口**: （待补）——例如继续看某层的 forward 细节，或跳去别处
+
+---
+
+### 2026-08-02: PP（Pipeline Parallel）+ AsyncLLM 多卡执行流
+
+**理解了什么**:
+- PP 分层：`make_layers` + `get_pp_indices` 把层均分给各 PP rank
+- PP 通信：`isend_tensor_dict` / `irecv_tensor_dict`，只传 `IntermediateTensors({"hidden_states", "residual"})`——**不传 KV cache**
+- 每个 rank 管自己那几层的 KV cache（物理上在不同 GPU）
+- `AsyncIntermediateTensors`：懒等待 comm，实现计算/通信重叠
+- 多卡执行流：EngineCore.step() → Scheduler.schedule() → Executor.execute_model() → collective_rpc("execute_model", ...) → rpc_broadcast_mq.enqueue → worker 进程 dequeue → Worker.execute_model() → model_runner
+- WorkerBase.model_runner 是 nn.Module 槽位，GPUWorker 赋值为 GPUModelRunnerV1
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| （待补） | |
+| （待补） | |
+
+**下次入口**: （待补）
+
+---
+
+### 2026-08-02: EP（Expert Parallel）+ Mooncake（Disaggregated Prefill/Decode）
+
+**理解了什么**:
+- MoE：FFN 换成 SparseMoeBlock（Router → all-to-all dispatch → expert compute → all-to-all combine），attention/KV cache 不变
+- EP vs PP 的区别：PP 按层切（传 hidden_states），Disagg 按阶段切（传完整 KV cache，两个实例都有完整模型）
+- Mooncake 架构：Scheduler 端（get_num_new_matched_tokens → 问远端算了多少 token）+ Worker 端（start_load_kv / send_kv_to_decode）
+- MooncakeConnector 不逐层同步（save_kv_layer = pass），而是异步批量：register_kv_caches 注册 GPU 显存地址 → ZMQ 协商 → RDMA GPU-to-GPU 直传
+- 完整链路：scheduler.py:621 → get_num_new_matched_tokens → update_state_after_alloc(783) → build_connector_meta(960) → SchedulerOutput → kv_connector_model_runner_mixin.py:102 start_load_kv → MooncakeConnectorWorker → send_kv_to_decode → batch_transfer_sync_write
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| （待补） | |
+| （待补） | |
+
+**下次入口**: （待补）——如 Mooncake 细节 / EPLB 负载均衡
+
+---
+
+### 2026-08-03: TP（Tensor Parallel）多卡配置案例分析
+
+**理解了什么**:
+- TP主要是在切分权重，通过all reduce和all gather，来分摊显存的压力
+- TP不是越小越好也不是越大越好，而是需要权衡权重的大小和硬件的关系，要考虑权重按照TP大小切分之后，在单节点的卡上面占用了多大比例的空间，然后还要考虑TP如果比较大，则卡间通信的代价也会随之变大，所以需要两方面的权衡
+
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| 70B fp16 权重 140GB 怎么算的？| 700亿参数，7*10^10 * 2 大约140GB|
+| TP 为什么不是越大越好？ |因为TP越大 也就是一个权重要在更多的卡上有部分，那计算时all reduce和all gather需要在卡间传递数据的次数和量都会增大，有可能因为通信的带宽和速率而性能遇到瓶颈|
+| TP=2/4/8 怎么选、为什么选 4？ |2 的话kv cache只有10GB 太小了，8的话通信带宽和频率会变大，性能受影响|
+| 为什么 TP 不跨机器（带宽墙）？RDMA 用在哪？ |TP需要每次计算都做all gather all reduce, 需要大量的通信，如果跨机器，那么通信的速度相比于卡间通信更加慢，性能瓶颈容易受限，RDMA主要用在跨机器的PP/DP/EP/KV cache传输|
+
+**卡点**: 1. 一开始不知道看什么，入口太宽没方向；2. "单节点上限" 是带宽墙不是显存墙，一开始理解偏了
+
+**下次入口**: （待补）——如 PP是如何做的 有什么作用 
+
+
+---
+
 ## 目录
 
 1. [组拓扑（5D tensor 分组）](#1-组拓扑5d-tensor-分组)
@@ -46,6 +135,8 @@
 4. [通信原语](#4-通信原语)
 5. [Expert Parallel / MoE 路由](#5-expert-parallel--moe-路由)
 6. [Worker 架构](#6-worker-架构)
+7. [AsyncLLM 多卡执行流](#7-asyncllm-多卡执行流)
+8. [Disaggregated Prefill/Decode（Mooncake）](#8-disaggregated-prefilldecode-mooncake)
 
 ---
 
@@ -186,12 +277,18 @@ output = tensor_model_parallel_all_reduce(output_parallel)
 
 ## 3. Pipeline Parallel（PP）
 
-> ❌ 还没看
+> ✅ 已读（2026-08-02），细节见 Session 笔记 + 07-interview-prep #11
+
+### 核心要点
+
+- 层切分：`make_layers` + `get_pp_indices`（models/utils.py:620）把层均分给 PP rank
+- 通信：`isend_tensor_dict` / `irecv_tensor_dict`（parallel_state.py:851/946）
+- **传什么**：只传 `IntermediateTensors({"hidden_states", "residual"})`，不传 KV cache
+- 每 rank 管自己那几层的 KV cache（物理上不同 GPU）
+- `AsyncIntermediateTensors`（gpu_worker.py:73）：懒等待 comm，计算/通信重叠
 
 ### 待学习内容
 
-- 层级别切分方式
-- p2p send / recv 传输激活值
 - 微批次（micro-batch）调度
 - PP 与 TP 的组合
 
@@ -199,7 +296,7 @@ output = tensor_model_parallel_all_reduce(output_parallel)
 
 ## 4. 通信原语
 
-> ❌ 还没看
+> ⚠️ 部分：collective_rpc / MQ 已读；communication_op.py 的 all-reduce 包装未细读
 
 ### 待学习内容
 
@@ -212,12 +309,19 @@ output = tensor_model_parallel_all_reduce(output_parallel)
 
 ## 5. Expert Parallel / MoE 路由
 
-> ❌ 还没看
+> ✅ 已读（2026-08-02，EP 概念 + SparseMoeBlock 入口），细节见 Session 笔记
+
+### 核心要点
+
+- MoE 把 FFN 换成 SparseMoeBlock：Router(`gate`) → all-to-all dispatch → expert compute → all-to-all combine
+- 只有 FFN 用 expert，attention/KV cache 不变
+- 每个 expert 是小型 MLP（gate_up → silu(gate)*up → down）
+- 相关文件：qwen2_moe.py:125（SparseMoeBlock）、moe_runner.py:567-767（MoERunner）
 
 ### 待学习内容
 
-- DP 与 EP 的关系
-- all-to-all 通信（token 路由到 expert 所在 rank）
+- `FusedMoE`（fused_moe/layer.py）→ `MoERunner._forward_impl`（moe_runner.py:717）
+- DP 与 EP 的关系（DP 即 EP 的另一种叫法）
 - DeepSeek V3 256 expert 的切分方式
 - `vllm/distributed/elastic_ep/`
 - Expert 并行负载均衡（EPLB）
@@ -226,13 +330,94 @@ output = tensor_model_parallel_all_reduce(output_parallel)
 
 ## 6. Worker 架构
 
-> ❌ 还没看
+> ✅ 已读（2026-08-02，Worker/WorkerBase/GPUWorker 结构），细节见 §7
+
+### 核心要点
+
+- WorkerBase：model_runner 是 nn.Module 槽位（worker_base.py:88），load_model/execute_model 抽象
+- WorkerWrapperBase：每个 executor 进程一个，`init_worker` 懒初始化
+- GPUWorker（gpu_worker.py:105）：execute_model → PP recv(非首 rank) → model_runner.execute_model → PP send(非末 rank)
 
 ### 待学习内容
 
-- `vllm/worker/worker.py`（单卡工作者）
-- `vllm/worker/multi_step_worker.py`（多步 worker）
-- executor（调度 worker 执行）
+- executor 详细实现（MultiprocExecutor 内部结构）
+
+---
+
+## 7. AsyncLLM 多卡执行流
+
+> ✅ 已读（2026-08-02）
+
+### 完整调用链
+
+```
+AsyncLLM
+  → EngineCoreClient (IPC)
+    → EngineCore.step()（主循环）
+      → scheduler.schedule()                    → SchedulerOutput
+      → executor.execute_model(scheduler_output)
+        → MultiprocExecutor.execute_model()     （multiproc_executor.py:306）
+          → collective_rpc("execute_model", args=(scheduler_output,))   （line 339）
+            → rpc_broadcast_mq.enqueue(...)     ← 方法名+参数进共享内存 MQ
+              ↓ (worker 进程 dequeue)
+            → Worker.execute_model(scheduler_output)   ← GPUWorker
+              → model_runner.execute_model(...)        ← model forward
+      → sampler.sample()                        → 采样 token
+      → 更新 request 状态 + 回收 KV cache block
+```
+
+### 关键代码
+
+- `multiproc_executor.py:306` `execute_model` → `collective_rpc`
+- `multiproc_executor.py:339` `collective_rpc`：`rpc_broadcast_mq.enqueue((method, args, kwargs, output_rank))`
+- `worker_base.py:88` `self.model_runner: nn.Module | None`（槽位）
+- `worker_base.py:130` `load_model()` 抽象 → GPUWorker 实现 → model_runner.load_model()
+- `gpu_worker.py:753` `execute_model`：PP recv → forward → PP send
+
+---
+
+## 8. Disaggregated Prefill/Decode（Mooncake）
+
+> ✅ 已读（2026-08-02），细节见 Session 笔记 + 07-interview-prep #14
+
+### PP vs Disagg 区分（易混点）
+
+| | PP (Pipeline Parallel) | Disaggregated (Mooncake) |
+|---|---|---|
+| **切什么** | 按层切模型 | 按请求阶段切 |
+| **实例关系** | stage 串行，各持部分层 | 两个完整模型实例 |
+| **传什么** | hidden_states（中间激活） | **完整 KV cache** |
+| **KV cache** | 各 stage 管自己那几层 | prefill 算完整 KV → RDMA 传 decode |
+
+### 架构
+
+- 配置：`KVTransferConfig`（kv_role: producer/consumer/both）
+- 抽象：`KVConnectorBase_V1` → Scheduler 端 + Worker 端
+- MooncakeConnector：**不逐层同步**（save_kv_layer = pass），异步批量
+- 传输：register_kv_caches 注册 GPU 显存地址 → ZMQ 协商 → Mooncake TransferEngine `batch_transfer_sync_write` RDMA 直传 GPU→GPU
+
+### 完整链路（decode 视角）
+
+```
+scheduler.py:621  get_num_new_matched_tokens()   问"prefill 算了多少 token？"
+scheduler.py:783  update_state_after_alloc()     记录哪些 block 要拉
+scheduler.py:946  _build_kv_connector_meta()     → SchedulerOutput.kv_connector_metadata
+  ↓ (collective_rpc 到 worker)
+kv_connector_model_runner_mixin.py:102  start_load_kv()
+  → MooncakeConnectorWorker._start_load_kv()     decode 端
+      → receive_kv() → receive_kv_from_single_worker()   ZMQ 请求 prefill
+  → MooncakeConnectorWorker.record_send_reqs()   prefill 端
+      → send_kv_to_decode()                     响应
+          → _build_transfer_params() → _send_blocks()
+              → engine.batch_transfer_sync_write(remote, src_ptrs, dst_ptrs, lengths)
+```
+
+### 关键文件
+
+- `kv_connector/v1/base.py`：KVConnectorBase_V1、KVConnectorRole（SCHEDULER/WORKER）
+- `kv_connector/v1/mooncake/mooncake_connector.py`：MooncakeConnectorScheduler(461)、MooncakeConnectorWorker(703)、send_kv_to_decode(978)、register_kv_caches(1351)、_send_blocks(1332)
+- `kv_connector/utils.py:425`：TransferTopology
+- `config/kv_transfer.py`：KVTransferConfig
 
 ---
 
