@@ -1,742 +1,468 @@
-# Transformer Layer Matrix Computation - ASCII Diagrams
+# Transformer 计算图解 — 全班读书会版
 
-## 1. TP Column Split (ColumnParallelLinear)
-
-```
-                  W_gate (8192, 28672)  Full Matrix
-+--------------------------------------------------+
-|##################################################|
-|##################################################|  8192
-|##################################################|
-+--------------------------------------------------+
-                          |
-                  Split along columns (TP=4)
-                          v
-+----------+----------+----------+----------+
-|  rank 0  |  rank 1  |  rank 2  |  rank 3  |
-| (8192,   | (8192,   | (8192,   | (8192,   |
-|  7168)   |  7168)   |  7168)   |  7168)   |  8192
-|          |          |          |          |
-+----------+----------+----------+----------+
-   7168       7168       7168       7168
-                          |
-                  Each card computes independently
-                          v
-+----------+----------+----------+----------+
-| partial  | partial  | partial  | partial  |
-| output 0 | output 1 | output 2 | output 3 |
-| (1,2048, | (1,2048, | (1,2048, | (1,2048, |
-|  7168)   |  7168)   |  7168)   |  7168)   |
-+----------+----------+----------+----------+
-                          |
-                     all-gather
-                  (concat results)
-                          v
-                  +-------------------+
-                  |  Full Output      |
-                  |  (1, 2048, 8192)  |
-                  +-------------------+
-```
-
-**Key insight**: Input x is full (1, 2048, 8192). Each card has full input. Weight is split, each card computes part of columns. all-gather concatenates 4 x 7168 back to 8192.
+> 全文用**一个**生活画面贯穿：4 个同学轮流分享读书心得。
+> 矩阵里所有行都对应 token，用符号 `q_i/k_i/v_i` 表达"第 i 个 token 的向量"。
 
 ---
 
-## 2. TP Row Split (RowParallelLinear)
+## 0. 开场：读书会一天 —— 一个 Transformer 层的全文地图
+
+**场景**：4 个同学 t0~t3 坐在一排，按顺序轮流发言分享读书感想。
+**规则**：发言时只能参考**坐在自己前面**的同学说过的话（不能听未来的）——这就是因果 mask。
+
+**先看全貌**：整篇笔记就讲**一个 Transformer 层**：输入 `x`，输出 `x'`。
+这一层内部只有两大块活——**Attention（讨论吸收）** 和 **FFN（独立消化）**：
+
+| 环节 | 读书会画面 | 核心概念 | 数据流 |
+|---|---|---|---|
+| 入场 (§1) | 每人把 8 个要点写成纸条 | Embedding | `token` → `向量 x` |
+| 讨论吸收 (§2-§6) | 互相打量 → 守规则 → 分注意力 → 吸收 | Attention | `x` → `融合上下文的新向量` |
+| 独立消化 (§7) | 听完别人的，回家用自己的话**理解**一遍 | FFN | `新向量` → `自己理解后的向量 x'` |
+
+> **这一层的输入 / 输出**：输入 = `x`（每个 token 自己的原始向量），
+> 输出 = `x'`（吸收别人的 + 自己理解之后的新向量，形状不变，内容升级）。
+>
+> **为什么中间要有这一步**：Attention 只是"把别人的说法搬过来"，但那还是别人想的；
+> FFN 让每个位置**用自己独立的参数**把这些信息真正理解一遍，变成自己的理解——
+> 计算里有非线性和大维度变换，这才让模型能表达"自己悟出来的"东西。
+>
+> **Attention 的细节**（不改变"吸收"本身，只是换做法）：TP 并行切分 [§8]、KV cache 黑板记录 [§9]。
+>
+> **这一层要重复 N 次** [§10]：x' 当下一层的 x；层间传递要通信 [§11]。
+
+## 1. 输入矩阵 x — 行 = token
+
+**画面**：每位同学把自己对书的 8 个要点掌握程度写成一张纸条，4 张纸条叠起来。
+**技术**：`x` 是 (seq=4, hidden=8) 矩阵，其中：
+- **seq（sequence）= 序列长度**：输入里有几个 token。画面 = **参加读书会的同学人数**，本课 4 人。
+- **hidden（hidden dimension）= 隐藏维度**：每个 token 的向量有几维。画面 = **每个同学脑子的要点数**，本课每人记 8 个要点。
+- 所以 `x (4, 8)` = 4 个 token × 每个 8 维。
+
+**第 i 行 = 第 i 个 token 的向量**，第 d 列 = hidden 的第 d 维。
 
 ```
- W_down (28672, 8192)                 x also split along rows
-+----------+                      Each card: (1, 2048, 2048)
-|##########|
-|##########| rank 0              +--------+
-|##########| (7168, 8192)        |  x0    |--> partial sum 0
-+----------+                     +--------+
-|##########|
-|##########| rank 1              +--------+
-|##########| (7168, 8192)        |  x1    |--> partial sum 1
-+----------+                     +--------+
-|##########|
-|##########| rank 2              +--------+
-|##########| (7168, 8192)        |  x2    |--> partial sum 2
-+----------+                     +--------+
-|##########|
-|##########| rank 3              +--------+
-|##########| (7168, 8192)        |  x3    |--> partial sum 3
-+----------+                     +--------+
-    |                                 |
-    +---------------------------------+
-                      |
-                 all-reduce
-              (sum: 0+1+2+3)
-                      |
+x (4, 8)
+       dim0   dim1   dim2   dim3   dim4   dim5   dim6   dim7
+t0  [  x00    x01    x02    x03    x04    x05    x06    x07 ]   ← 第 0 个 token
+t1  [  x10    x11    x12    x13    x14    x15    x16    x17 ]   ← 第 1 个 token
+t2  [  x20    x21    x22    x23    x24    x25    x26    x27 ]   ← 第 2 个 token
+t3  [  x30    x31    x32    x33    x34    x35    x36    x37 ]   ← 第 3 个 token
+```
+
+**关键点**：**行索引 = token 索引**。这条规则贯穿全文——Q/K/V/scores/输出都是"每行一个 token"。
+理解任何矩阵先问：**行是谁？列是谁？**
+
+---
+
+## 2. Q/K/V 投影 — 每人准备三张卡片
+
+**画面**：发言前每个同学准备 3 张卡片：
+- **Q 卡（问题）**：我想听什么 → 决定我会被谁吸引
+- **K 卡（线索）**：我能提供什么 → 让别人知道找我有没有用
+- **V 卡（内容）**：我实际讲什么 → 别人真正听到的东西
+
+**技术**：`Q = x @ W_q`，`K = x @ W_k`，`V = x @ W_v`。
+三个投影共享输入 x，但权重不同，所以同一个 token 得到 3 个不同向量。
+
+```
+x (4, 8)           x (4, 8)           x (4, 8)
+  │ @ W_q            │ @ W_k            │ @ W_v
+  v                  v                  v
+Q (4, 8)           K (4, 8)           V (4, 8)
+
+Q — 每行 = 一个 token 的问题向量:
+    q0  ← 第 0 个 token 的问题
+    q1  ← 第 1 个 token 的问题
+    q2  ← 第 2 个 token 的问题
+    q3  ← 第 3 个 token 的问题
+K、V 同理: k_i / v_i 是第 i 个 token 的线索/内容向量
+```
+
+**关键点**：Q/K/V 的行索引**仍然 = token 索引**。
+`q_i` = token i 想听什么；`k_j` = token j 能提供什么；`v_j` = token j 讲的内容。
+（下标字母不同 = 不同卡片，但下标数字相同 = 同一个同学。）
+
+> **先把"头"（head）说清楚**：
+>
+> | 术语 | 画面 | 含义 |
+> |---|---|---|
+> | head（注意力头） | 一个关注角度 | 同一场讨论，有人注意"谁讲得对"、有人注意"谁讲得新" |
+> | head_dim | 每个头分的维数 | 每个头在自己的维度里独立做一套 Q/K/V 匹配 |
+>
+> 本课 `hidden=8` 分成 **2 个头**，每个头用 **head_dim=4 维**（详见 §8.1）。
+> 这也是为什么 §5 的 scale 除的是 `/√head_dim` = `/√4` 而不是 `/√8`。
+
+> **GQA（分组查询注意力）**：真实大模型里 Q 的头数常常**多于** K/V 的头数。
+> 画面：每个同学心里的问题（Q）是**各有各的**，但大家提供的内容（K/V）可以**共享同一套线索**。
+>
+> ```
+> 例: Q 有 2 个头, K/V 只有 1 个头 (2 个 Q 头共享 1 个 KV 头)
+>
+> Q: [ head0 | head1 ]     K/V: [ head0 ]
+>                              repeat_interleave(2) 复制一份
+>                              [ head0 | head0 ]   ← 和 Q 的头数对齐
+>
+> head0 用 KV-head0, head1 也用 KV-head0
+> ```
+>
+> 为什么省内存？K/V 头数少 → KV cache 占用减半（每少一半 KV 头，缓存就少一半）。
+> 论文里常见 64 Q 头配 8 KV 头（每 8 个 Q 头共享 1 个 KV 头），推理时省大量显存。
+
+---
+
+## 3. scores = Q @ Kᵀ — 谁对谁的注意力
+
+**画面**：每个同学拿自己的 Q 卡，和**每个同学**的 K 卡比对话题相似度（包括自己）。
+相似度 = 点积（向量内积），方向越一致分数越高。
+
+**技术**：`scores[i][j] = q_i · k_j` —— **第 i 个 token 对第 j 个 token 的注意力分数**。
+
+```
+scores (4, 4)
+      t0        t1        t2        t3
+t0  [ q0·k0     q0·k1     q0·k2     q0·k3 ]   ← 第 0 个 token 看所有人
+t1  [ q1·k0     q1·k1     q1·k2     q1·k3 ]   ← 第 1 个 token 看所有人
+t2  [ q2·k0     q2·k1     q2·k2     q2·k3 ]
+t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]
+
+怎么读: scores[i][j] = q_i·k_j
+  ↑ 行 i = 提问者 (谁在听)
+  ↓ 列 j = 回答者 (谁在讲)
+  → "第 i 个 token 有多想听第 j 个 token 讲"
+
+对角线 q_i·k_i = 自己和自己的匹配度 (永远存在, 因为自己总能听自己)
+```
+
+**关键点**：**scores 的行列索引分别对应两个 token**。这就是"每个 token 关注其他 token"的数学表达——矩阵里的每个格子就是一对 token 之间的关系。
+
+---
+
+## 4. 因果 mask — 只能看前面的
+
+**画面**：座位规则——t2 只能听坐他前面的 t0、t1 讲，**不能**听后面的 t3（她还没发言）。
+**技术**：把上三角（j > i）全部设为 -inf。
+
+```
+mask 前:                                 mask 后 (j > i 全部 -inf):
+      t0        t1        t2        t3              t0        t1        t2        t3
+t0  [ q0·k0     q0·k1     q0·k2     q0·k3 ]   t0  [ q0·k0     -inf      -inf      -inf ]
+t1  [ q1·k0     q1·k1     q1·k2     q1·k3 ]   t1  [ q1·k0     q1·k1     -inf      -inf ]
+t2  [ q2·k0     q2·k1     q2·k2     q2·k3 ]   t2  [ q2·k0     q2·k1     q2·k2     -inf ]
+t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]   t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]
+
+观察:
+  第 0 行只留 1 格  →  t0 只能听自己
+  第 1 行留 2 格    →  t1 听 t0 + 自己
+  第 2 行留 3 格    →  t2 听 t0, t1, 自己
+  第 3 行留 4 格    →  t3 听所有人
+  每行保留的格子数 = 行索引 + 1
+```
+
+**关键点**：mask 把"未来"全部抹掉。保留的格子构成**下三角（含对角线）**，
+对角线上方 = 未来的 token（还没发言）→ 一律不看。
+
+---
+
+## 5. softmax — 注意力权重（这里用数字）
+
+**画面**：每个同学把"对前面同学的相似度分数"换算成**注意力百分比**——谁跟我最相关，
+我就把更多"注意力"放在他身上。同一行所有百分比加起来 = 100%。
+
+**技术**：对每行做 softmax：大的分数占比高，小的占比低，行和为 1。
+
+> **别忘了 scale 一步**：真实实现里 softmax 前会先做 `scores / √head_dim`（本课 head_dim = 4, √4 = 2，见 §2 的头说明）。
+> 为什么？点积分数会随维度变大而膨胀（8 维点积可能到几十），直接 softmax 会"两极分化"——
+> 一个数霸占几乎全部权重。除以 √head_dim 把分数拉回合适范围，softmax 才平滑、分布才合理。
+> （本课示例分数较小，为演示省去这一步；vLLM 代码里 `scaled_dot_product_attention` 会自动处理。）
+
+```
+softmax 后 (每行 = 第 i 个 token 的注意力权重, 和为 1):
+      t0        t1        t2        t3
+t0  [ 1.00      0.00      0.00      0.00    ]   ← 只能听自己, 100% 给自己
+t1  [ 0.38      0.62      0.00      0.00    ]   ← 38% 给 t0, 62% 给自己
+t2  [ 0.27      0.27      0.46      0.00    ]   ← 27% t0 + 27% t1 + 46% 自己
+t3  [ 0.17      0.18      0.28      0.38    ]   ← 四人都有份, 自己权重最高
+
+怎么算 (以第 1 行为例): softmax(0.32, 0.79)   ← 已除 scale 后的分数
+  exp(0.32)=1.38,  exp(0.79)=2.20
+  → 0.38 = 1.38/(1.38+2.20),  0.62 = 2.20/(1.38+2.20)
+```
+
+**关键点**：softmax 是**按行独立**操作的（每行 = 一个 token 的注意力分配）。
+权重**必须用数字**——因为它就是"分多少注意力"本身。数字大 = 那个 token 影响我多。
+
+---
+
+## 6. out = weights @ V — 综合吸收
+
+**画面**：听完前面同学讲的内容（v_j），每个同学按注意力百分比把它们**加权混合**，
+形成自己的新理解。跟自己最相关的同学，他的内容占的比重最大。
+
+**技术**：`out[i] = Σ_j weights[i][j] × v_j` —— 第 i 个 token 的注意力权重
+去加权所有它看得到的 token 的内容向量。
+
+```
+out[i] = 第 i 行权重 × 所有 v_j   (j 只遍历 mask 后还活着的列)
+
+out[t0] = 1.00 × v0
+out[t1] = 0.38 × v0 + 0.62 × v1
+out[t2] = 0.27 × v0 + 0.27 × v1 + 0.46 × v2
+out[t3] = 0.17 × v0 + 0.18 × v1 + 0.28 × v2 + 0.38 × v3
+
+      ┌──────────────────┬──────────────────┬──────────────────┐
+      │  权重 (第 i 行)  │内容向量 (第 j 行)│      加权和      │
+      │  [w0 w1 w2 w3]   │ [v0; v1; v2; v3] │     → out[i]     │
+      └──────────────────┴──────────────────┴──────────────────┘
+      一个行向量 × 一个矩阵 = 一个行向量
+      (1, 4)      ×   (4, 4)     = (1, 4)
+```
+
+**关键点**：注意这里的乘法方向——**行向量 × 矩阵 = 行向量**。
+out 的第 i 行 = 第 i 个 token 吸收所有可见 token 信息后的新向量。行索引仍然不变。
+
+> **残差连接（residual）**：真实的 Transformer 层不会直接用 out 作为输出，
+> 而是 `x + out`（把原始输入加回去，所以叫"残差"）。画面：**讨论完别忘了自己原来的想法**——
+> 新理解是在自己原有 8 个要点的基础上"补充修正"，而不是全盘替换。
+> 作用：梯度好传（每层都有一条"直通快车道"回传），深层网络也能稳定训练。
+> 这也是为什么 §10 流程图里 attention 和 FFN 后面都画了 `+x residual`。
+
+---
+
+## 7. FFN — 逐 token 独立加工
+
+**画面**：上课讨论完，放学回家每人**独立**做作业——不需要听别人，每个人用同一套公式。
+这正是 FFN 的本质：**逐 token 独立**（行与行之间不交换信息）。
+
+**技术**：SwiGLU，`8 → 16 → 8`：
+
+```
+Step 1: gate_i = x_i @ W_gate   (8 → 16)   ← 门控: 这道题该不该用力
+        up_i   = x_i @ W_up     (8 → 16)   ← 内容: 具体怎么做
+Step 2: fused_i = SiLU(gate_i) × up_i      ← 逐元素相乘
+Step 3: out_i  = fused_i @ W_down (16 → 8) ← 压缩回 hidden
+
+对每个 token i (i = 0,1,2,3) 都做同样的三件事:
+
+x_i (1, 8) ──► gate_i = x_i @ W_gate ──► fused_i = SiLU(gate_i) × up_i
+   │                                  ▲
+   │                                  │
+   └────────► up_i = x_i @ W_up ──────┘
+                                  │
+                                  ▼
+                          out_i = fused_i @ W_down  (1, 8)
+
+关键: W_gate/W_up/W_down 是"全班共享的同一套公式"
+      每个 token 拿自己的 x_i 去套这套公式, 互不干扰
+```
+
+**关键点**：attention 是**行与行之间**的信息交换（token 互相看），
+FFN 是**行内**的加工（每个 token 自己算）。这也是为什么 FFN 不需要通信。
+
+> **RMSNorm（归一化）**：真实 Transformer 层在 attention 前和 FFN 前各有一层归一化。
+> 画面：**讨论前先让大家把音量调一致**——向量各维度的数值范围差异太大（有的要点 0.9、有的 0.01），
+> 直接算容易让大数值主导一切。归一化把每行向量的"尺度"拉齐，数值稳定才好训练。
+>
+> ```
+> 完整一层 (真实模型):
+>   x → RMSNorm → Attention → +x 残差 → RMSNorm → FFN → +x 残差 → 输出
+>        ↑                      ↑                    ↑
+>      音量调齐              保留原想法          音量再调齐一次
+> ```
+>
+> 本课聚焦 attention/FFN 的计算本身，归一化细节先不展开；知道"每块大计算前先归一化"即可。
+> （vLLM 代码里是 `RMSNorm`，比 LayerNorm 少算均值，更快。）
+
+---
+
+## 8. TP — 分组协作（block 分布）
+
+**画面**：内容太多，老师把 4 个同学分成 **2 组**（rank 0 / rank 1），
+每组负责记录不同的要点，最后汇总成完整笔记。
+
+**技术**：TP 的两种切法。
+
+### 8.1 Attention 切 head（每个 rank 算不同的 head）
+
+```
+heads = 2, tp_size = 2 → rank 0 算 head0, rank 1 算 head1
+
+W_q (8, 8) 按列切:
+  rank 0 拿列 0~3 → Q0 = x @ W_q[:, 0:4]  (4, 4)   ← 只有 head0
+  rank 1 拿列 4~7 → Q1 = x @ W_q[:, 4:8]  (4, 4)   ← 只有 head1
+  K、V 同理。
+
+每个 rank 内部: Q@Kᵀ → /√head_dim (scale) → mask → softmax → @V  完全独立, 不需要通信!
+最后: all-gather(out0, out1) = (4, 8)   ← 两个 head 拼回完整 hidden (拼接, 不是相加)
+
+对应关系: rank r 负责 W_q 的第 r×heads/tp ~ (r+1)×heads/tp 个 head
+```
+
+### 8.2 FFN 切列/切行（W_gate/W_up 切列，W_down 切行）
+
+```
+intermediate = 16, tp_size = 2 → 每个 rank 负责 8 个中间维度
+
+W_gate (8, 16) 按列切:        W_down (16, 8) 按行切:
++----------------+           +----------------+
+| rank0: 列 0~7  |           | rank0: 行 0~7  |
++----------------+           +----------------+
+| rank1: 列 8~15 |           | rank1: 行 8~15 |
++----------------+           +----------------+
+
+rank 0: gate0 = x @ W_gate[:, 0:8]   (4, 8)   ← 中间维 0~7
+        fused0 = SiLU(gate0) × up0   (4, 8)
+        out0   = fused0 @ W_down[0:8, :]  (4, 8)  ← 部分和
+
+rank 1: gate1 = x @ W_gate[:, 8:16]  (4, 8)   ← 中间维 8~15
+        fused1 = SiLU(gate1) × up1   (4, 8)
+        out1   = fused1 @ W_down[8:16, :]  (4, 8)  ← 部分和
+
+out = out0 + out1   ← all-reduce 把两个部分和相加, 得到完整 (4, 8)
+```
+
+**关键点**：
+- Attention 切 head：head 之间**天然无依赖**，各自算完用 **all-gather 拼接**（concat，结果变长），不需要求和。
+- FFN 切维度：每个 rank 只算**一半中间维**，最后 W_down 的**部分和必须 all-reduce 相加**（sum，结果不变）。
+- **all-gather vs all-reduce**：拼接 = 结果变宽（合起来才完整）；相加 = 结果不变（每块都是部分和）。
+- 对应关系：rank r 负责 W_gate 的第 `r×intermediate/tp ~ (r+1)×intermediate/tp` 列。
+
+---
+
+## 9. KV cache — 黑板上的发言记录
+
+**画面**：教室前面有块大黑板，每位同学讲过的内容（K/V 卡片）都写在上面。
+**后面的同学不用让前面同学重讲一遍**，抬头看黑板就行——这就是 KV cache。
+
+**技术**：decode 阶段每个新 token 都要和**之前所有 token** 做 attention。
+不缓存就得每步重算前面所有 token 的 K/V——浪费算力。缓存后：只算新 token 的 Q，
+去和缓存的 K 匹配。
+
+### 9.1 黑板分块（block 管理）
+
+**画面**：黑板分成固定大小的小格，每格记 2 个同学的发言（block_size = 2）。
+
+```
+block_size = 2, 4 个 token:
+
+block 0 (物理块):  [ t0 | t1 ]
+block 1 (物理块):  [ t2 | t3 ]
+
+逻辑顺序  t0 → t1 → t2 → t3     (连续)
+物理存放  块0   块0   块1   块1   (按块找)
+
+对应关系: 第 i 个 token 的 K/V 在哪个块?
+  block_index = i // block_size
+  slot        = i %  block_size
+  t0 → 块0 槽0,  t1 → 块0 槽1,  t2 → 块1 槽0,  t3 → 块1 槽1
+```
+
+### 9.2 新同学来了（decode 新 token）
+
+```
+新 token t4 → 算出 q4, 要跟 t0~t3 全部做 attention:
+
+  q4 去 block 0 拿 t0/t1 的 K/V, 再去 block 1 拿 t2/t3 的 K/V
+  只查 2 个块就拿到全部 4 个人的记录
+
+如果 t0 被淘汰 (paged 回收): 只需释放 block 0, 其他 block 不动
+```
+
+**关键点**：KV cache 让 decode 阶段**不用每步重算**前面所有 token 的 K/V（省算力），
+直接读缓存做 attention（复杂度从"每步 O(seq) 重算 K/V"降为"只算新 token 的 Q，K/V 查表即得"）。
+block 的意义：内存按固定大小管理，逻辑连续的 token 物理上可以分散，靠 block 表映射。
+
+---
+
+## 10. 完整流程串联 — 读书会的一天
+
+```
+               start: 4 students x (4, 8)          <- row = token
+                      │
+       ┌──────────────┼──────────────┐
+       │  Q/K/V projection (cards)   │
+       │   Q(4,8)  K(4,8)  V(4,8)    │
+       └──────────────┼──────────────┘
+                      │
+    ┌─────────────────┴─────────────────┐
+    │    scores = Q@K^T  (q_i . k_j)    │
+    │      scale = /sqrt(head_dim)      │
+    │      causal mask (upper tri)      │
+    │     softmax rows (weights,=1)     │
+    │       out = W@V  (mix v_j)        │
+    └─────────────────┴─────────────────┘
+                      │
+               +x residual (keep info)
+                      │
+       ┌──────────────┼──────────────┐
+       │  FFN per-token processing   │
+       │  gate/up -> SiLU* -> down   │
+       └──────────────┼──────────────┘
+                      │
+               +x residual -> out (4,8)
+                      │
+         ┌────────────┴────────────┐
+         │  next layer (repeat)    │
+         │  attention + FFN        │
+         └────────────┬────────────┘
+                      │
+    between layers: teacher passes notes (PP)
+    rank 0 teaches layers 1-40, rank 1: 41-80
+                      │
                       v
-            +-------------------+
-            |  Full Output      |
-            |  (1, 2048, 8192)  |
-            +-------------------+
+               final: output probs
 ```
 
-**Key insight**: Weight split along rows (input dim 28672 -> each card 7168). Input x also split along rows. Each card computes partial sum. all-reduce adds 4 partial sums = full result.
+> 注意 "next layer (repeat)"：真实模型里这里不是一次，而是把
+> **Attention + FFN 这一整段重复 N 层**——每层的输出 x' 又作为下一层的输入 x。
+> 补全边界：真实模型开头还有 **Embedding**（把词表里的词变成向量，`vocab → hidden`），
+> 结尾有 **LM Head**（把最后一层输出映射回词表，`hidden → vocab`，softmax 后取概率最大的词）。
+> 本课聚焦中间的 Transformer 计算，这两层只是"入口"和"出口"。
 
 ---
 
-## 3. Column vs Row Comparison
+## 11. 通信账本 — 每次小组协作要花多少口舌
+
+**画面**：两组同学各自记完笔记后需要碰头汇总，这个"碰头"就是通信。
 
 ```
-+-------------------------------------------+  +-------------------------------------------+
-| ColumnParallelLinear                      |  | RowParallelLinear                         |
-+-------------------------------------------+  +-------------------------------------------+
-|                                           |  |                                           |
-|  x (full input)                           |  |  x (split along rows)                     |
-|     |                                     |  |     |                                     |
-|     v                                     |  |     v                                     |
-|  [W_chunk]  (split along columns)         |  |  [W_chunk]  (split along rows)            |
-|     |                                     |  |     |                                     |
-|     v                                     |  |     v                                     |
-|  partial output  (each card has 1/N)      |  |  partial sum  (each card computes sum)    |
-|     |                                     |  |     |                                     |
-|     v                                     |  |     v                                     |
-|  all-gather  (concat N parts)             |  |  all-reduce  (sum N parts)                |
-|     |                                     |  |     |                                     |
-|     v                                     |  |     v                                     |
-|  full output  (1, seq, hidden)            |  |  full output  (1, seq, hidden)            |
-|                                           |  |                                           |
-+-------------------------------------------+  +-------------------------------------------+
-```
+以 hidden=8192, TP=4, batch=1, seq=2048, fp16 (2 bytes) 为例:
 
-**In Attention**:
-- W_q, W_k, W_v -> ColumnParallel (split cols, output partial)
-- W_o -> RowParallel (split rows, output partial sum -> all-reduce)
+┌───────────────────────────────────────────────────────────────┐
+│Attention 层                                                   │
+│  输入 all-reduce: 2048 × 8192 × 2B = 32 MB (读+写 = 64 MB)    │
+│  输出 all-reduce: 同上 = 64 MB                                │
+│  Attention 通信 = 128 MB                                      │
+├───────────────────────────────────────────────────────────────┤
+│FFN 层                                                         │
+│  W_gate/W_up all-reduce: 2048 × 28672 × 2B = 112 MB           │
+│  (读+写 = 224 MB)                                             │
+│  FFN 通信 = 224 MB                                            │
+├───────────────────────────────────────────────────────────────┤
+│单层总计: 128 + 224 = 352 MB                                   │
+│80 层: 352 × 80 = 28.16 GB                                     │
+│                                                               │
+│这就是为什么 TP 必须在一个节点内 (NVLink 带宽才够)             │
+└───────────────────────────────────────────────────────────────┘
 
-**In FFN**:
-- W_gate, W_up -> ColumnParallel (split cols)
-- W_down -> RowParallel (split rows -> all-reduce)
-
----
-
-## 4. Attention Matrix Multiplication
-
-```
-    Q (64, 2048, 128)           K^T (64, 128, 2048)
-+-----------------+          +-----------------+
-|  heads=64       |          |  heads=64       |
-|  seq=2048       |          |  head_dim=128   |
-|  head_dim=128   |          |  seq=2048       |
-+-----------------+          +-----------------+
-        |                            |
-        +------------x---------------+
-                       |
-                       v
-              +-------------------+
-              |  scores           |
-              |  (64, 2048, 2048) |
-              |  per-head attn    |
-              |  matrix           |
-              |  scores[i][j] =   |
-              |  attn weight      |
-              |  token_i -> j     |
-              +-------------------+
-                       |
-                  / sqrt(128) + causal mask
-                       |
-                       v
-                     softmax
-                       |
-                       v
-    V (64, 2048, 128)          scores (64, 2048, 2048)
-+-----------------+          +-----------------+
-|  heads=64       |          |  scores         |
-|  seq=2048       |          |  (2048, 2048)   |
-|  head_dim=128   |          |                 |
-+-----------------+          +-----------------+
-        |                            |
-        +------------x---------------+
-                       |
-                       v
-              +-------------------+
-              |  output           |
-              |  (64, 2048, 128)  |
-              |                   |
-              |  reshape ->       |
-              |  (1, 2048, 8192)  |
-              +-------------------+
-```
-
-**GQA (Grouped Query Attention)**:
-- Q has 64 heads, K/V only 8 heads
-- Every 8 Q heads share 1 KV head
-- K/V repeat_interleave(8) to expand to 64 heads
-
----
-
-## 5. FFN (SwiGLU)
-
-```
-    hidden_states (1, 2048, 8192)
-                 |
-         +-------+-------+
-         v               v
-    +---------+    +---------+
-    | W_gate  |    | W_up    |
-    | (8192,  |    | (8192,  |
-    |  28672) |    |  28672) |
-    +---------+    +---------+
-         v               v
-    +---------+    +---------+
-    |  gate   |    |   up    |
-    | (1,2048,|    | (1,2048,|
-    |  28672) |    |  28672) |
-    +---------+    +---------+
-         v               v
-         +-------+-------+
-                 v
-          SiLU(gate) * up
-                 v
-          +-------------+
-          |  activated  |
-          | (1, 2048,   |
-          |  28672)     |
-          +-------------+
-                 |
-         +-------+-------+
-         v
-    +---------+
-    | W_down  |
-    | (28672, |
-    |  8192)  |
-    +---------+
-         v
-    +-------------+
-    |  output     |
-    | (1, 2048,   |
-    |  8192)      |
-    +-------------+
-```
-
-**FFN pattern**: up-project (8192 -> 28672), then down-project (28672 -> 8192). Middle dim is 3.5x.
-
----
-
-## 6. Full Transformer Layer
-
-```
-    token_ids (1, 2048)
-         |
-         v
-    +-------------+
-    |  Embedding  |  nn.Embedding(vocab, 8192)
-    +-------------+
-         |
-         v
-    hidden_states (1, 2048, 8192)
-         |
-         v
-    +-------------------------------------------+
-    |           Transformer Layer x 80           |
-    |                                           |
-    |  +---------+                              |
-    |  | RMSNorm |                              |
-    |  +---------+                              |
-    |       |                                   |
-    |       v                                   |
-    |  +-------------------------------------+  |
-    |  |        Attention (GQA)              |  |
-    |  |  Q = x @ W_q  (ColumnParallel)      |  |
-    |  |  K = x @ W_k  (ColumnParallel)      |  |
-    |  |  V = x @ W_v  (ColumnParallel)      |  |
-    |  |  scores = Q @ K^T                   |  |
-    |  |  out = softmax(scores) @ V          |  |
-    |  |  out = out @ W_o (RowParallel)      |  | <-- all-reduce
-    |  +-------------------------------------+  |
-    |       |                                   |
-    |       v                                   |
-    |  +---------+                              |
-    |  |Residual |  <-- skip connection         |
-    |  +---------+                              |
-    |       |                                   |
-    |       v                                   |
-    |  +---------+                              |
-    |  | RMSNorm |                              |
-    |  +---------+                              |
-    |       |                                   |
-    |       v                                   |
-    |  +-------------------------------------+  |
-    |  |        FFN (SwiGLU)                  |  |
-    |  |  gate = x @ W_gate (ColumnParallel)  |  |
-    |  |  up = x @ W_up    (ColumnParallel)   |  |
-    |  |  act = SiLU(gate) * up              |  |
-    |  |  out = act @ W_down (RowParallel)   |  | <-- all-reduce
-    |  +-------------------------------------+  |
-    |       |                                   |
-    |       v                                   |
-    |  +---------+                              |
-    |  |Residual |                              |
-    |  +---------+                              |
-    |                                           |
-    +-------------------------------------------+
-         |
-         v
-    +---------------+
-    | Final RMSNorm |
-    +---------------+
-         |
-         v
-    +---------------+
-    |   LM Head     |  Linear(8192, vocab)
-    +---------------+
-         |
-         v
-    logits (1, 2048, vocab)
-         |
-         v
-    argmax -> next token
+对比 PP: 每层只传 1 次 hidden (1, 2048, 8192) = 32 MB, 通信量小得多
 ```
 
 ---
 
-## 7. TP Communication Pattern
+## 速记口诀
 
 ```
-Per-layer communication:
-
-    ColumnParallel          RowParallel
-    (W_q, W_k, W_v,        (W_o, W_down)
-     W_gate, W_up)
-         |                       |
-         v                       v
-    Each card computes      Each card computes
-    independently           partial sum
-    (no communication)      (no communication)
-         |                       |
-         v                       v
-    +---------+           +---------+
-    | partial |           | partial |
-    | result  |           | sum     |
-    +---------+           +---------+
-         |                       |
-         v                       v
-    all-gather             all-reduce
-    (concat)               (sum)
-         |                       |
-         v                       v
-    +---------+           +---------+
-    | full    |           | full    |
-    | output  |           | output  |
-    +---------+           +---------+
-```
-
-**TP=4 means 2 cross-card communications per layer**:
-1. After Attention: all-reduce (after W_o)
-2. After FFN: all-reduce (after W_down)
-
-**80 layers = 160 all-reduces per token**. This is why TP cannot cross nodes (bandwidth too low).
-
----
-
-## 8. PP Split
-
-```
-    +-------------------------------------------+
-    |              Stage 0 (GPU 0-3)             |
-    |                                           |
-    |   Layer 0 -> Layer 1 -> ... -> Layer 39   |
-    |                                           |
-    +-------------------------------------------+
-                         |
-              Pass hidden_states (1, 2048, 8192)
-              Only 1 transfer per step
-                         |
-                         v
-    +-------------------------------------------+
-    |              Stage 1 (GPU 4-7)             |
-    |                                           |
-    |  Layer 40 -> Layer 41 -> ... -> Layer 79  |
-    |                                           |
-    +-------------------------------------------+
-                         |
-                         v
-                   Final RMSNorm
-                         |
-                         v
-                      LM Head
-```
-
-**PP vs TP communication volume**:
-- TP: 2 all-reduces per layer x 80 layers = 160 synchronizations
-- PP: 1 hidden_states transfer per forward pass = 1 synchronization
-
-PP is node-friendly, TP must stay within a node.
-
----
-
-## 9. Attention - Every Step with Matrix Shapes
-
-```
-Input: hidden_states (batch=1, seq=2048, hidden=8192)
-
-============================================================
-Step 1: Q, K, V Projections (ColumnParallel)
-============================================================
-
-  hidden_states (1, 2048, 8192)
-         |
-         +--------------------+--------------------+
-         |                    |                    |
-         v                    v                    v
-    +----------+         +----------+         +----------+
-    |   W_q    |         |   W_k    |         |   W_v    |
-    | (8192,   |         | (8192,   |         | (8192,   |
-    |  8192)   |         |  1024)   |         |  1024)   |
-    +----------+         +----------+         +----------+
-         |                    |                    |
-         v                    v                    v
-    Q (1, 2048, 8192)    K (1, 2048, 1024)    V (1, 2048, 1024)
-
-  Note: W_k and W_v are smaller because GQA (8 KV heads vs 64 Q heads)
-
-============================================================
-Step 2: Reshape to (batch, heads, seq, head_dim)
-============================================================
-
-  Q (1, 2048, 8192)                 K (1, 2048, 1024)
-         |                                |
-         v                                v
-  reshape(1, 2048, 64, 128)        reshape(1, 2048, 8, 128)
-         |                                |
-         v                                v
-  Q (1, 64, 2048, 128)            K (1, 8, 2048, 128)
-         |                                |
-         v                                v
-  transpose(1,2)                    transpose(1,2)
-         |                                |
-         v                                v
-  Q (1, 64, 2048, 128)            K (1, 8, 2048, 128)
-
-  Same for V:
-  V (1, 2048, 1024) -> reshape -> V (1, 8, 2048, 128)
-
-============================================================
-Step 3: GQA - Repeat K, V to match Q heads
-============================================================
-
-  Q has 64 heads, K has 8 heads
-  Every 8 Q heads share 1 KV head
-
-  K (1, 8, 2048, 128)
-         |
-         v
-  repeat_interleave(repeats=8, dim=1)
-         |
-         v
-  K (1, 64, 2048, 128)   <-- now same head count as Q
-
-  Same for V:
-  V (1, 8, 2048, 128) -> repeat -> V (1, 64, 2048, 128)
-
-============================================================
-Step 4: Attention Scores = Q @ K^T
-============================================================
-
-  Q (1, 64, 2048, 128)           K^T (1, 64, 128, 2048)
-  [batch, heads, seq, dim]       [batch, heads, dim, seq]
-         |                              |
-         +--------------x---------------+
-                        |
-                        v
-              scores (1, 64, 2048, 2048)
-              [batch, heads, seq_q, seq_k]
-
-  Interpretation:
-  scores[b][h][i][j] = how much token i attends to token j
-
-============================================================
-Step 5: Scale + Causal Mask + Softmax
-============================================================
-
-  scores (1, 64, 2048, 2048)
-         |
-         v
-  scores = scores / sqrt(128)   <-- scale by head_dim
-         |
-         v
-  Apply causal mask:
-  +-------+-------+-------+-------+
-  |  0    | -inf  | -inf  | -inf  |  token 0 can only see itself
-  |  0    |   0   | -inf  | -inf  |  token 1 can see 0,1
-  |  0    |   0   |   0   | -inf  |  token 2 can see 0,1,2
-  |  0    |   0   |   0   |   0   |  token 3 can see all
-  +-------+-------+-------+-------+
-         |
-         v
-  softmax(dim=-1)   <-- softmax over key dimension
-         |
-         v
-  attn_weights (1, 64, 2048, 2048)
-  Each row sums to 1.0
-
-============================================================
-Step 6: Weighted Sum = attn_weights @ V
-============================================================
-
-  attn_weights (1, 64, 2048, 2048)    V (1, 64, 2048, 128)
-  [batch, heads, seq_q, seq_k]        [batch, heads, seq_k, dim]
-         |                                    |
-         +----------------x-------------------+
-                           |
-                           v
-              attn_output (1, 64, 2048, 128)
-              [batch, heads, seq_q, dim]
-
-  attn_output[b][h][i] = sum_j( weights[i][j] * V[j] )
-  = weighted average of values, weighted by attention scores
-
-============================================================
-Step 7: Reshape back + Output Projection (RowParallel)
-============================================================
-
-  attn_output (1, 64, 2048, 128)
-         |
-         v
-  transpose(1,2)  -> (1, 2048, 64, 128)
-         |
-         v
-  reshape(1, 2048, 8192)   <-- concat all heads
-         |
-         v
-  +----------+
-  |   W_o    |
-  | (8192,   |
-  |  8192)   |
-  +----------+
-         |
-         v
-  output (1, 2048, 8192)
-  This is RowParallel -> all-reduce across TP ranks
-```
-
----
-
-## 10. FFN - Every Step with Matrix Shapes
-
-```
-Input: hidden_states (1, 2048, 8192)   (after Attention + Residual + RMSNorm)
-
-============================================================
-Step 1: Gate and Up Projections (ColumnParallel)
-============================================================
-
-  hidden_states (1, 2048, 8192)
-         |
-         +--------------------+
-         |                    |
-         v                    v
-    +----------+         +----------+
-    | W_gate   |         | W_up     |
-    | (8192,   |         | (8192,   |
-    |  28672)  |         |  28672)  |
-    +----------+         +----------+
-         |                    |
-         v                    v
-    gate (1, 2048, 28672)  up (1, 2048, 28672)
-
-  Both are ColumnParallel -> each card has 1/4 of columns
-
-============================================================
-Step 2: Activation = SiLU(gate) * up
-============================================================
-
-  gate (1, 2048, 28672)          up (1, 2048, 28672)
-         |                              |
-         v                              |
-    SiLU(gate)                          |
-    = gate * sigmoid(gate)              |
-         |                              |
-         +--------------*---------------+
-                        |
-                        v
-              activated (1, 2048, 28672)
-
-  Element-wise multiplication, no communication needed
-
-============================================================
-Step 3: Down Projection (RowParallel)
-============================================================
-
-  activated (1, 2048, 28672)
-         |
-         v
-    +----------+
-    | W_down   |
-    | (28672,  |
-    |  8192)   |
-    +----------+
-         |
-         v
-    output (1, 2048, 8192)
-    This is RowParallel -> all-reduce across TP ranks
-```
-
----
-
-## 11. TP Block Index - How Weight Shards Map to Columns/Rows
-
-```
-Example: W_gate (8192, 28672) with TP=4
-
-Full matrix columns:  0     7168   14336  21504  28672
-                      |      |      |      |      |
-                      v      v      v      v      v
-+----------+----------+----------+----------+----------+
-|  rank 0  |  rank 1  |  rank 2  |  rank 3  |
-| cols     | cols     | cols     | cols     |
-| 0-7167   | 7168-    | 14336-   | 21504-   |
-|          | 14335    | 21503    | 28671    |
-+----------+----------+----------+----------+
-    7168       7168       7168       7168
-
-Each rank holds: W_gate_shard (8192, 7168)
-
-When computing: x (1, 2048, 8192) @ W_gate_shard (8192, 7168)
-  -> gate_shard (1, 2048, 7168)   <-- only 1/4 of output columns
-
-After all-gather: concat [gate_shard_0, gate_shard_1, gate_shard_2, gate_shard_3]
-  -> gate (1, 2048, 28672)   <-- full output
-```
-
-```
-Example: W_down (28672, 8192) with TP=4
-
-Full matrix rows:  0     7168   14336  21504  28672
-                   |      |      |      |      |
-                   v      v      v      v      v
-+----------+----------+----------+----------+
-|  rank 0  |  rank 1  |  rank 2  |  rank 3  |
-| rows     | rows     | rows     | rows     |
-| 0-7167   | 7168-    | 14336-   | 21504-   |
-|          | 14335    | 21503    | 28671    |
-+----------+----------+----------+----------+
-    7168       7168       7168       7168
-
-Each rank holds: W_down_shard (7168, 8192)
-
-Input x also split along rows:
-  x_shard (1, 2048, 7168)   <-- only 1/4 of input rows
-
-When computing: x_shard (1, 2048, 7168) @ W_down_shard (7168, 8192)
-  -> output_shard (1, 2048, 8192)   <-- partial sum
-
-After all-reduce: output_shard_0 + output_shard_1 + output_shard_2 + output_shard_3
-  -> output (1, 2048, 8192)   <-- full result
-```
-
----
-
-## 12. Complete Data Flow with TP=4
-
-```
-hidden_states (1, 2048, 8192)   <-- full on all cards
-
-============ Attention ============
-
-  Q = x @ W_q   (ColumnParallel)
-  +------------------------------------------+
-  | Each card: x (1,2048,8192) @ W_q_shard  |
-  |          (8192, 2048) = Q_shard          |
-  |          (1, 2048, 2048)                 |
-  +------------------------------------------+
-           |
-           v
-  all-gather Q across ranks
-           |
-           v
-  Q (1, 2048, 8192) -> reshape -> (1, 64, 2048, 128)
-
-  K = x @ W_k   (ColumnParallel)
-  V = x @ W_v   (ColumnParallel)
-  Same pattern -> all-gather -> reshape
-
-  GQA: repeat K, V to match Q heads
-
-  scores = Q @ K^T   (independent per card, no communication)
-  scores = softmax(scores / sqrt(128) + mask)
-  attn_out = scores @ V   (independent per card, no communication)
-
-  out = attn_out @ W_o   (RowParallel)
-  +------------------------------------------+
-  | Each card: attn_out_shard @ W_o_shard    |
-  |          = partial_sum (1, 2048, 8192)   |
-  +------------------------------------------+
-           |
-           v
-  all-reduce (sum partial sums)
-           |
-           v
-  attn_output (1, 2048, 8192)   <-- full on all cards
-
-============ FFN ============
-
-  gate = x @ W_gate   (ColumnParallel)
-  +------------------------------------------+
-  | Each card: x (1,2048,8192) @ W_gate_sh  |
-  |          (8192, 7168) = gate_shard       |
-  |          (1, 2048, 7168)                 |
-  +------------------------------------------+
-           |
-           v
-  all-gather gate across ranks
-           |
-           v
-  gate (1, 2048, 28672)
-
-  up = x @ W_up   (ColumnParallel)
-  Same pattern -> all-gather -> up (1, 2048, 28672)
-
-  activated = SiLU(gate) * up   (independent, no communication)
-
-  out = activated @ W_down   (RowParallel)
-  +------------------------------------------+
-  | Each card: activated_shard @ W_down_sh   |
-  |          (7168, 8192) = partial_sum      |
-  |          (1, 2048, 8192)                 |
-  +------------------------------------------+
-           |
-           v
-  all-reduce (sum partial sums)
-           |
-           v
-  ffn_output (1, 2048, 8192)   <-- full on all cards
-
-============ Residual + RMSNorm ============
-
-  output = RMSNorm(x + attn_output + ffn_output)
-  (element-wise, no communication)
-```
-
----
-
-## 13. Communication Count per Layer
-
-```
-TP=4, 1 layer:
-
-  Attention:
-    1. all-gather Q   (after W_q)
-    2. all-gather K   (after W_k)
-    3. all-gather V   (after W_v)
-    4. all-reduce out  (after W_o)
-    = 4 communications
-
-  FFN:
-    1. all-gather gate  (after W_gate)
-    2. all-gather up    (after W_up)
-    3. all-reduce out   (after W_down)
-    = 3 communications
-
-  Total per layer: 7 communications
-  Total for 80 layers: 560 communications per token
-
-  But in practice:
-  - Q/K/V projections are often fused -> 1 all-gather
-  - Gate/Up projections are often fused -> 1 all-gather
-  - So realistic: 4 communications per layer = 320 per token
+行 = token, 永远不变           (所有矩阵每行都是一个 token)
+q_i 想听什么, k_j 提供什么, v_j 讲什么  (三张卡片)
+GQA: Q 头多 K/V 头少          (多个 Q 头共享 1 个 KV 头, 省 KV cache)
+scores[i][j] = q_i·k_j        (行 i 多想听列 j)
+softmax 前先 /√head_dim       (scale: 分数太大容易两极分化)
+上三角 -inf = 不能听未来的      (mask)
+softmax 按行, 行和为 1         (注意力权重)
+out[i] = Σ w_j × v_j          (加权混合, 行向量×矩阵)
+x + out 残差 = 保留原想法      (每层都有直通快车道)
+大计算前 RMSNorm = 先调音量    (数值尺度拉齐)
+FFN 逐行独立 = 回家自己做作业    (行内加工)
+TP 切 head all-gather 拼接 / 切维度 all-reduce 相加
+KV cache = 黑板记录, 分块管理   (不用重讲, block 映射)
 ```
