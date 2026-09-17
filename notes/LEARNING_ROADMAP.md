@@ -32,12 +32,12 @@ P1 [████████░░] ✅  Prefill/Decode 区分、KV cache 概念
 P2 [████████░░] ✅  PagedAttention、block table、block 生命周期
 P3 [████████░░] ✅  连续批处理与调度细节
 P4 [█████████░] 🔧  function call（主干+核心算法+共享状态已覆盖）
-P5 [███████░░░] 🔧  分布式推理（全部已读，**待复述验证掌握度**）
+P5 [█████████░] 🔧  分布式推理（通信层✅已闭环、TP/PP复述✅、配置链✅；剩: 1F1B/气泡率 + 其余复述验证）
 P6 [░░░░░░░░░░] ❌  Ascend 适配与 CANN
 P7 [░░░░░░░░░░] ❌  面试准备与实战
 ```
 
-下一站：**Phase 5 收尾（通信原语细读 + 配置案例）→ Phase 6 Ascend，或从面试清单复述开始**
+下一站：**Phase 5 收尾（1F1B/气泡率公式 + EP/AsyncLLM/Mooncake 复述验证）→ Phase 6 Ascend，或从面试清单复述开始**
 
 ---
 
@@ -323,7 +323,7 @@ create_chat_completion()
 | 5 | MoE / Expert Parallel（SparseMoeBlock 入口） | ✅ |
 | 6 | AsyncLLM 多卡执行流（collective_rpc/MQ/Worker） | ✅ |
 | 7 | Disaggregated Prefill/Decode（Mooncake） | ✅ |
-| 8 | 通信原语细读（communication_op.py） | ❌ 待学 |
+| 8 | 通信原语细读（communication_op.py） | ✅ 2026-08-10（薄壳→GroupCoordinator→NCCL 三层） |
 | 9 | 多卡配置案例（实际部署怎么选 TP/PP/EP） | ❌ 待学 |
 
 ### 代码漫游路径
@@ -357,6 +357,8 @@ third_party/vllm/vllm/model_executor/layers/
 ---
 
 ## Phase 6：Ascend 适配与 CANN 层（3-5 天）🔧
+
+> 📍 状态: 2026-08-12 开荒，学习地图已建（notes/06-ascend-cann.md），含 5 天路径 + 好奇心菜单 + 代码漫游
 
 ### 学习目标
 

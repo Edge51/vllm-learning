@@ -43,10 +43,10 @@
 ```
 x (4, 8)
        dim0   dim1   dim2   dim3   dim4   dim5   dim6   dim7
-t0  [  x00    x01    x02    x03    x04    x05    x06    x07 ]   ← 第 0 个 token
-t1  [  x10    x11    x12    x13    x14    x15    x16    x17 ]   ← 第 1 个 token
-t2  [  x20    x21    x22    x23    x24    x25    x26    x27 ]   ← 第 2 个 token
-t3  [  x30    x31    x32    x33    x34    x35    x36    x37 ]   ← 第 3 个 token
+t0  [  x00    x01    x02    x03    x04    x05    x06    x07 ]   <- 第 0 个 token
+t1  [  x10    x11    x12    x13    x14    x15    x16    x17 ]   <- 第 1 个 token
+t2  [  x20    x21    x22    x23    x24    x25    x26    x27 ]   <- 第 2 个 token
+t3  [  x30    x31    x32    x33    x34    x35    x36    x37 ]   <- 第 3 个 token
 ```
 
 **关键点**：**行索引 = token 索引**。这条规则贯穿全文——Q/K/V/scores/输出都是"每行一个 token"。
@@ -66,15 +66,15 @@ t3  [  x30    x31    x32    x33    x34    x35    x36    x37 ]   ← 第 3 个 to
 
 ```
 x (4, 8)           x (4, 8)           x (4, 8)
-  │ @ W_q            │ @ W_k            │ @ W_v
+  | @ W_q            | @ W_k            | @ W_v
   v                  v                  v
 Q (4, 8)           K (4, 8)           V (4, 8)
 
-Q — 每行 = 一个 token 的问题向量:
-    q0  ← 第 0 个 token 的问题
-    q1  ← 第 1 个 token 的问题
-    q2  ← 第 2 个 token 的问题
-    q3  ← 第 3 个 token 的问题
+Q - 每行 = 一个 token 的问题向量:
+    q0  <- 第 0 个 token 的问题
+    q1  <- 第 1 个 token 的问题
+    q2  <- 第 2 个 token 的问题
+    q3  <- 第 3 个 token 的问题
 K、V 同理: k_i / v_i 是第 i 个 token 的线索/内容向量
 ```
 
@@ -100,7 +100,7 @@ K、V 同理: k_i / v_i 是第 i 个 token 的线索/内容向量
 >
 > Q: [ head0 | head1 ]     K/V: [ head0 ]
 >                              repeat_interleave(2) 复制一份
->                              [ head0 | head0 ]   ← 和 Q 的头数对齐
+>                              [ head0 | head0 ]   <- 和 Q 的头数对齐
 >
 > head0 用 KV-head0, head1 也用 KV-head0
 > ```
@@ -120,17 +120,17 @@ K、V 同理: k_i / v_i 是第 i 个 token 的线索/内容向量
 ```
 scores (4, 4)
       t0        t1        t2        t3
-t0  [ q0·k0     q0·k1     q0·k2     q0·k3 ]   ← 第 0 个 token 看所有人
-t1  [ q1·k0     q1·k1     q1·k2     q1·k3 ]   ← 第 1 个 token 看所有人
-t2  [ q2·k0     q2·k1     q2·k2     q2·k3 ]
-t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]
+t0  [ q0.k0     q0.k1     q0.k2     q0.k3 ]   <- 第 0 个 token 看所有人
+t1  [ q1.k0     q1.k1     q1.k2     q1.k3 ]   <- 第 1 个 token 看所有人
+t2  [ q2.k0     q2.k1     q2.k2     q2.k3 ]
+t3  [ q3.k0     q3.k1     q3.k2     q3.k3 ]
 
-怎么读: scores[i][j] = q_i·k_j
-  ↑ 行 i = 提问者 (谁在听)
-  ↓ 列 j = 回答者 (谁在讲)
-  → "第 i 个 token 有多想听第 j 个 token 讲"
+怎么读: scores[i][j] = q_i.k_j
+  ^ 行 i = 提问者 (谁在听)
+  v 列 j = 回答者 (谁在讲)
+  -> "第 i 个 token 有多想听第 j 个 token 讲"
 
-对角线 q_i·k_i = 自己和自己的匹配度 (永远存在, 因为自己总能听自己)
+对角线 q_i.k_i = 自己和自己的匹配度 (永远存在, 因为自己总能听自己)
 ```
 
 **关键点**：**scores 的行列索引分别对应两个 token**。这就是"每个 token 关注其他 token"的数学表达——矩阵里的每个格子就是一对 token 之间的关系。
@@ -145,16 +145,16 @@ t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]
 ```
 mask 前:                                 mask 后 (j > i 全部 -inf):
       t0        t1        t2        t3              t0        t1        t2        t3
-t0  [ q0·k0     q0·k1     q0·k2     q0·k3 ]   t0  [ q0·k0     -inf      -inf      -inf ]
-t1  [ q1·k0     q1·k1     q1·k2     q1·k3 ]   t1  [ q1·k0     q1·k1     -inf      -inf ]
-t2  [ q2·k0     q2·k1     q2·k2     q2·k3 ]   t2  [ q2·k0     q2·k1     q2·k2     -inf ]
-t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]   t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]
+t0  [ q0.k0     q0.k1     q0.k2     q0.k3 ]   t0  [ q0.k0     -inf      -inf      -inf ]
+t1  [ q1.k0     q1.k1     q1.k2     q1.k3 ]   t1  [ q1.k0     q1.k1     -inf      -inf ]
+t2  [ q2.k0     q2.k1     q2.k2     q2.k3 ]   t2  [ q2.k0     q2.k1     q2.k2     -inf ]
+t3  [ q3.k0     q3.k1     q3.k2     q3.k3 ]   t3  [ q3.k0     q3.k1     q3.k2     q3.k3 ]
 
 观察:
-  第 0 行只留 1 格  →  t0 只能听自己
-  第 1 行留 2 格    →  t1 听 t0 + 自己
-  第 2 行留 3 格    →  t2 听 t0, t1, 自己
-  第 3 行留 4 格    →  t3 听所有人
+  第 0 行只留 1 格  ->  t0 只能听自己
+  第 1 行留 2 格    ->  t1 听 t0 + 自己
+  第 2 行留 3 格    ->  t2 听 t0, t1, 自己
+  第 3 行留 4 格    ->  t3 听所有人
   每行保留的格子数 = 行索引 + 1
 ```
 
@@ -178,14 +178,14 @@ t3  [ q3·k0     q3·k1     q3·k2     q3·k3 ]   t3  [ q3·k0     q3·k1     q3
 ```
 softmax 后 (每行 = 第 i 个 token 的注意力权重, 和为 1):
       t0        t1        t2        t3
-t0  [ 1.00      0.00      0.00      0.00    ]   ← 只能听自己, 100% 给自己
-t1  [ 0.38      0.62      0.00      0.00    ]   ← 38% 给 t0, 62% 给自己
-t2  [ 0.27      0.27      0.46      0.00    ]   ← 27% t0 + 27% t1 + 46% 自己
-t3  [ 0.17      0.18      0.28      0.38    ]   ← 四人都有份, 自己权重最高
+t0  [ 1.00      0.00      0.00      0.00    ]   <- 只能听自己, 100% 给自己
+t1  [ 0.38      0.62      0.00      0.00    ]   <- 38% 给 t0, 62% 给自己
+t2  [ 0.27      0.27      0.46      0.00    ]   <- 27% t0 + 27% t1 + 46% 自己
+t3  [ 0.16      0.18      0.28      0.38    ]   <- 四人都有份, 自己权重最高
 
-怎么算 (以第 1 行为例): softmax(0.32, 0.79)   ← 已除 scale 后的分数
+怎么算 (以第 1 行为例): softmax(0.32, 0.79)   <- 已除 scale 后的分数
   exp(0.32)=1.38,  exp(0.79)=2.20
-  → 0.38 = 1.38/(1.38+2.20),  0.62 = 2.20/(1.38+2.20)
+  -> 0.38 = 1.38/(1.38+2.20),  0.62 = 2.20/(1.38+2.20)
 ```
 
 **关键点**：softmax 是**按行独立**操作的（每行 = 一个 token 的注意力分配）。
@@ -202,19 +202,19 @@ t3  [ 0.17      0.18      0.28      0.38    ]   ← 四人都有份, 自己权�
 去加权所有它看得到的 token 的内容向量。
 
 ```
-out[i] = 第 i 行权重 × 所有 v_j   (j 只遍历 mask 后还活着的列)
+out[i] = 第 i 行权重 * 所有 v_j   (j 只遍历 mask 后还活着的列)
 
-out[t0] = 1.00 × v0
-out[t1] = 0.38 × v0 + 0.62 × v1
-out[t2] = 0.27 × v0 + 0.27 × v1 + 0.46 × v2
-out[t3] = 0.17 × v0 + 0.18 × v1 + 0.28 × v2 + 0.38 × v3
+out[t0] = 1.00 * v0
+out[t1] = 0.38 * v0 + 0.62 * v1
+out[t2] = 0.27 * v0 + 0.27 * v1 + 0.46 * v2
+out[t3] = 0.16 * v0 + 0.18 * v1 + 0.28 * v2 + 0.38 * v3
 
-      ┌──────────────────┬──────────────────┬──────────────────┐
-      │  权重 (第 i 行)  │内容向量 (第 j 行)│      加权和      │
-      │  [w0 w1 w2 w3]   │ [v0; v1; v2; v3] │     → out[i]     │
-      └──────────────────┴──────────────────┴──────────────────┘
-      一个行向量 × 一个矩阵 = 一个行向量
-      (1, 4)      ×   (4, 4)     = (1, 4)
+      +------------------+------------------+------------------+
+      |  权重 (第 i 行)  |内容向量 (第 j 行)|      加权和      |
+      |  [w0 w1 w2 w3]   | [v0; v1; v2; v3] |     -> out[i]    |
+      +------------------+------------------+------------------+
+      一个行向量 * 一个矩阵 = 一个行向量
+      (1, 4)      *   (4, 4)     = (1, 4)
 ```
 
 **关键点**：注意这里的乘法方向——**行向量 × 矩阵 = 行向量**。
@@ -236,20 +236,20 @@ out 的第 i 行 = 第 i 个 token 吸收所有可见 token 信息后的新向�
 **技术**：SwiGLU，`8 → 16 → 8`：
 
 ```
-Step 1: gate_i = x_i @ W_gate   (8 → 16)   ← 门控: 这道题该不该用力
-        up_i   = x_i @ W_up     (8 → 16)   ← 内容: 具体怎么做
-Step 2: fused_i = SiLU(gate_i) × up_i      ← 逐元素相乘
-Step 3: out_i  = fused_i @ W_down (16 → 8) ← 压缩回 hidden
+Step 1: gate_i = x_i @ W_gate   (8 -> 16)   <- 门控: 这道题该不该用力
+        up_i   = x_i @ W_up     (8 -> 16)   <- 内容: 具体怎么做
+Step 2: fused_i = SiLU(gate_i) * up_i       <- 逐元素相乘
+Step 3: out_i  = fused_i @ W_down (16 -> 8) <- 压缩回 hidden
 
 对每个 token i (i = 0,1,2,3) 都做同样的三件事:
 
-x_i (1, 8) ──► gate_i = x_i @ W_gate ──► fused_i = SiLU(gate_i) × up_i
-   │                                  ▲
-   │                                  │
-   └────────► up_i = x_i @ W_up ──────┘
-                                  │
-                                  ▼
-                          out_i = fused_i @ W_down  (1, 8)
+x_i (1, 8) --> gate_i = x_i @ W_gate --> fused_i = SiLU(gate_i) * up_i
+   |                                   ^
+   |                                   |
+   +--------> up_i = x_i @ W_up -------+
+                                       |
+                                       v
+                             out_i = fused_i @ W_down  (1, 8)
 
 关键: W_gate/W_up/W_down 是"全班共享的同一套公式"
       每个 token 拿自己的 x_i 去套这套公式, 互不干扰
@@ -264,9 +264,9 @@ FFN 是**行内**的加工（每个 token 自己算）。这也是为什么 FFN 
 >
 > ```
 > 完整一层 (真实模型):
->   x → RMSNorm → Attention → +x 残差 → RMSNorm → FFN → +x 残差 → 输出
->        ↑                      ↑                    ↑
->      音量调齐              保留原想法          音量再调齐一次
+>   x -> RMSNorm -> Attention -> +x 残差 -> RMSNorm -> FFN -> +x 残差 -> 输出
+>        ^                       ^          ^
+>        音量调齐                保留原想法 音量再调齐一次
 > ```
 >
 > 本课聚焦 attention/FFN 的计算本身，归一化细节先不展开；知道"每块大计算前先归一化"即可。
@@ -282,25 +282,26 @@ FFN 是**行内**的加工（每个 token 自己算）。这也是为什么 FFN 
 **技术**：TP 的两种切法。
 
 ### 8.1 Attention 切 head（每个 rank 算不同的 head）
-
 ```
-heads = 2, tp_size = 2 → rank 0 算 head0, rank 1 算 head1
+heads = 2, tp_size = 2 -> rank 0 算 head0, rank 1 算 head1
 
 W_q (8, 8) 按列切:
-  rank 0 拿列 0~3 → Q0 = x @ W_q[:, 0:4]  (4, 4)   ← 只有 head0
-  rank 1 拿列 4~7 → Q1 = x @ W_q[:, 4:8]  (4, 4)   ← 只有 head1
+  rank 0 拿列 0~3 -> Q0 = x @ W_q[:, 0:4]  (4, 4)   <- 只有 head0
+  rank 1 拿列 4~7 -> Q1 = x @ W_q[:, 4:8]  (4, 4)   <- 只有 head1
   K、V 同理。
 
-每个 rank 内部: Q@Kᵀ → /√head_dim (scale) → mask → softmax → @V  完全独立, 不需要通信!
-最后: all-gather(out0, out1) = (4, 8)   ← 两个 head 拼回完整 hidden (拼接, 不是相加)
+每个 rank 内部: Q@K^T -> /sqrt(head_dim) (scale) -> mask -> softmax -> @V  完全独立, 不需要通信!
+最后: 把每个 rank 自己的 head 输出拼回完整 hidden (4, 8)
+  (教学简化: 直接 all-gather 拼接两个 head 的输出)
+  (真实实现: 每个 rank 先各自乘一个输出投影 W_o, 再做 all-reduce 相加;
+   因为乘 W_o 是线性的, 先拼后乘 = 先乘后加, 两者数学完全等价 -> 结果都是完整 hidden)
 
-对应关系: rank r 负责 W_q 的第 r×heads/tp ~ (r+1)×heads/tp 个 head
+对应关系: rank r 负责 W_q 的第 r*heads/tp ~ (r+1)*heads/tp 个 head
 ```
 
 ### 8.2 FFN 切列/切行（W_gate/W_up 切列，W_down 切行）
-
 ```
-intermediate = 16, tp_size = 2 → 每个 rank 负责 8 个中间维度
+intermediate = 16, tp_size = 2 -> 每个 rank 负责 8 个中间维度
 
 W_gate (8, 16) 按列切:        W_down (16, 8) 按行切:
 +----------------+           +----------------+
@@ -309,21 +310,21 @@ W_gate (8, 16) 按列切:        W_down (16, 8) 按行切:
 | rank1: 列 8~15 |           | rank1: 行 8~15 |
 +----------------+           +----------------+
 
-rank 0: gate0 = x @ W_gate[:, 0:8]   (4, 8)   ← 中间维 0~7
-        fused0 = SiLU(gate0) × up0   (4, 8)
-        out0   = fused0 @ W_down[0:8, :]  (4, 8)  ← 部分和
+rank 0: gate0 = x @ W_gate[:, 0:8]   (4, 8)   <- 中间维 0~7
+        fused0 = SiLU(gate0) * up0   (4, 8)
+        out0   = fused0 @ W_down[0:8, :]  (4, 8)  <- 部分和
 
-rank 1: gate1 = x @ W_gate[:, 8:16]  (4, 8)   ← 中间维 8~15
-        fused1 = SiLU(gate1) × up1   (4, 8)
-        out1   = fused1 @ W_down[8:16, :]  (4, 8)  ← 部分和
+rank 1: gate1 = x @ W_gate[:, 8:16]  (4, 8)   <- 中间维 8~15
+        fused1 = SiLU(gate1) * up1   (4, 8)
+        out1   = fused1 @ W_down[8:16, :]  (4, 8)  <- 部分和
 
-out = out0 + out1   ← all-reduce 把两个部分和相加, 得到完整 (4, 8)
+out = out0 + out1   <- all-reduce 把两个部分和相加, 得到完整 (4, 8)
 ```
 
 **关键点**：
-- Attention 切 head：head 之间**天然无依赖**，各自算完用 **all-gather 拼接**（concat，结果变长），不需要求和。
-- FFN 切维度：每个 rank 只算**一半中间维**，最后 W_down 的**部分和必须 all-reduce 相加**（sum，结果不变）。
-- **all-gather vs all-reduce**：拼接 = 结果变宽（合起来才完整）；相加 = 结果不变（每块都是部分和）。
+- **两种切法的共同点**：qkv_proj（W_q/W_k/W_v 合并）和 gate_up_proj（W_gate/W_up）都是**按列切**（Column），每个 rank 只算自己被分到的维度，**输入侧不用通信**（输入 x 所有 rank 都有一份）。
+- **通信发生在输出侧**：由 Row 型投影（Attention 的 W_o、FFN 的 W_down）触发——每个 rank 算出部分和，**all-reduce 相加**得到完整 hidden。
+- **判断要不要 all-reduce**：只要同一份输出被切在多个 rank 上、又需要合起来变成"该有的形状"，就躲不开一次求和。Attention 和 FFN 的输出投影恰好都是这种情况。
 - 对应关系：rank r 负责 W_gate 的第 `r×intermediate/tp ~ (r+1)×intermediate/tp` 列。
 
 ---
@@ -340,26 +341,26 @@ out = out0 + out1   ← all-reduce 把两个部分和相加, 得到完整 (4, 8)
 ### 9.1 黑板分块（block 管理）
 
 **画面**：黑板分成固定大小的小格，每格记 2 个同学的发言（block_size = 2）。
-
+> 注：真实 vLLM 默认 `block_size = 16`（每块存 16 个 token 的 K/V），这里用 2 只是为了手把手讲清
+> `block_index`/`slot` 的映射关系——规则一模一样，只是块里格子数不同。
 ```
 block_size = 2, 4 个 token:
 
 block 0 (物理块):  [ t0 | t1 ]
 block 1 (物理块):  [ t2 | t3 ]
 
-逻辑顺序  t0 → t1 → t2 → t3     (连续)
+逻辑顺序  t0 -> t1 -> t2 -> t3     (连续)
 物理存放  块0   块0   块1   块1   (按块找)
 
 对应关系: 第 i 个 token 的 K/V 在哪个块?
   block_index = i // block_size
   slot        = i %  block_size
-  t0 → 块0 槽0,  t1 → 块0 槽1,  t2 → 块1 槽0,  t3 → 块1 槽1
+  t0 -> 块0 槽0,  t1 -> 块0 槽1,  t2 -> 块1 槽0,  t3 -> 块1 槽1
 ```
 
 ### 9.2 新同学来了（decode 新 token）
-
 ```
-新 token t4 → 算出 q4, 要跟 t0~t3 全部做 attention:
+新 token t4 -> 算出 q4, 要跟 t0~t3 全部做 attention:
 
   q4 去 block 0 拿 t0/t1 的 K/V, 再去 block 1 拿 t2/t3 的 K/V
   只查 2 个块就拿到全部 4 个人的记录
@@ -376,43 +377,41 @@ block 的意义：内存按固定大小管理，逻辑连续的 token 物理上�
 ## 10. 完整流程串联 — 读书会的一天
 
 ```
-               start: 4 students x (4, 8)          <- row = token
-                      │
-       ┌──────────────┼──────────────┐
-       │  Q/K/V projection (cards)   │
-       │   Q(4,8)  K(4,8)  V(4,8)    │
-       └──────────────┼──────────────┘
-                      │
-    ┌─────────────────┴─────────────────┐
-    │    scores = Q@K^T  (q_i . k_j)    │
-    │      scale = /sqrt(head_dim)      │
-    │      causal mask (upper tri)      │
-    │     softmax rows (weights,=1)     │
-    │       out = W@V  (mix v_j)        │
-    └─────────────────┴─────────────────┘
-                      │
-               +x residual (keep info)
-                      │
-       ┌──────────────┼──────────────┐
-       │  FFN per-token processing   │
-       │  gate/up -> SiLU* -> down   │
-       └──────────────┼──────────────┘
-                      │
-               +x residual -> out (4,8)
-                      │
-         ┌────────────┴────────────┐
-         │  next layer (repeat)    │
-         │  attention + FFN        │
-         └────────────┬────────────┘
-                      │
-    between layers: teacher passes notes (PP)
-    rank 0 teaches layers 1-40, rank 1: 41-80
-                      │
-                      v
-               final: output probs
+                start: 4 students x (4, 8)          <- row = token
+                       |
+     +-----------------+-----------------+<----------------+
+     |   Attention                       |                 |
+     |   Q/K/V projection (cards)        |                 |
+     |   Q(4,8)  K(4,8)  V(4,8)          |                 |
+     |   scores = Q@K^T  (q_i . k_j)     |                 |
+     |   scale / sqrt(head_dim)          |                 |
+     |   causal mask (upper tri)         |                 |
+     |   softmax rows (weights,=1)       |                 |
+     |   out = W@V  (mix v_j)            |                 |
+     +-----------------+-----------------+                 |
+                       |                                   |
+                +x residual (keep info)                    |
+                       |                                   |
+        +--------------+--------------+                    |
+        |  FFN per-token processing   |                    |
+        |  gate/up -> SiLU* -> down   |                    |
+        +--------------+--------------+                    |
+                       |                                   |
+                +x residual -> out x' (4,8)                |
+                       |                                   |
+                       +-----------------------------------+
+                        x' = 下一层的输入 x -> 回到 Attention
+                        (重复 N 层: 每层都是 Attention + FFN)
+                       |
+                       v
+     between layers: teacher passes notes (PP)
+     rank 0 teaches layers 1-40, rank 1: 41-80
+                       |
+                       v
+                final: output probs
 ```
 
-> 注意 "next layer (repeat)"：真实模型里这里不是一次，而是把
+> 注意图上**右侧的回线**（`x'` 处向上拐回 Attention）：真实模型里这里不是一次，而是把
 > **Attention + FFN 这一整段重复 N 层**——每层的输出 x' 又作为下一层的输入 x。
 > 补全边界：真实模型开头还有 **Embedding**（把词表里的词变成向量，`vocab → hidden`），
 > 结尾有 **LM Head**（把最后一层输出映射回词表，`hidden → vocab`，softmax 后取概率最大的词）。
@@ -424,28 +423,35 @@ block 的意义：内存按固定大小管理，逻辑连续的 token 物理上�
 
 **画面**：两组同学各自记完笔记后需要碰头汇总，这个"碰头"就是通信。
 
-```
 以 hidden=8192, TP=4, batch=1, seq=2048, fp16 (2 bytes) 为例:
 
-┌───────────────────────────────────────────────────────────────┐
-│Attention 层                                                   │
-│  输入 all-reduce: 2048 × 8192 × 2B = 32 MB (读+写 = 64 MB)    │
-│  输出 all-reduce: 同上 = 64 MB                                │
-│  Attention 通信 = 128 MB                                      │
-├───────────────────────────────────────────────────────────────┤
-│FFN 层                                                         │
-│  W_gate/W_up all-reduce: 2048 × 28672 × 2B = 112 MB           │
-│  (读+写 = 224 MB)                                             │
-│  FFN 通信 = 224 MB                                            │
-├───────────────────────────────────────────────────────────────┤
-│单层总计: 128 + 224 = 352 MB                                   │
-│80 层: 352 × 80 = 28.16 GB                                     │
-│                                                               │
-│这就是为什么 TP 必须在一个节点内 (NVLink 带宽才够)             │
-└───────────────────────────────────────────────────────────────┘
-
-对比 PP: 每层只传 1 次 hidden (1, 2048, 8192) = 32 MB, 通信量小得多
 ```
+每层 TP 通信 = 2 次输出 all-reduce (都在 Row 投影后, 维度都是 hidden=8192):
+
++---------------------------------------------------------------+
+|Attention 层                                                   |
+|  o_proj 输出 all-reduce: 2048 x 8192 x 2B = 32 MB             |
+|  (读+写: 每个 rank 发自己的部分和再收全, 约 2 倍)             |
++---------------------------------------------------------------+
+|FFN 层                                                         |
+|  W_down 输出 all-reduce: 2048 x 8192 x 2B = 32 MB             |
+|  (读+写: 同上, 约 2 倍)                                       |
++---------------------------------------------------------------+
+|单层通信数据量: 32 + 32 = 64 MB (每 rank 网络流量约 1.5~2 倍)  |
+|80 层: 64 x 80 = 5 GB                                          |
+|                                                               |
+|这就是为什么 TP 必须在一个节点内 (NVLink 带宽才够)             |
++---------------------------------------------------------------+
+```
+
+**为什么只算 hidden 不算 28672？** W_gate/W_up 确实是把 28672 维切成 4 份给 4 个 rank
+（每 rank 只做主 7168 维），但那是**切分**——每个 rank 只碰自己的那 1/4，**没有跨 rank 传输**。
+真正需要 all-reduce 的是输出侧：FFN 最后要变回 hidden 维度，而 hidden 这 8192 维是
+**被分在 4 个 rank 上部分和**（每个 rank 的 W_down 都算出 (2048, 8192) 的一部分），
+必须求和相加才能得到完整输出 → 通信的是 hidden 维度。中间维 28672 从不会整体跨 rank 移动。
+
+对比 PP: 每层只传 1 次 hidden (1, 2048, 8192) = 32 MB, 且是低频的逐层递进, 对比 TP 的高频 all-reduce
+更易跨节点。
 
 ---
 
@@ -455,11 +461,11 @@ block 的意义：内存按固定大小管理，逻辑连续的 token 物理上�
 行 = token, 永远不变           (所有矩阵每行都是一个 token)
 q_i 想听什么, k_j 提供什么, v_j 讲什么  (三张卡片)
 GQA: Q 头多 K/V 头少          (多个 Q 头共享 1 个 KV 头, 省 KV cache)
-scores[i][j] = q_i·k_j        (行 i 多想听列 j)
-softmax 前先 /√head_dim       (scale: 分数太大容易两极分化)
+scores[i][j] = q_i.k_j        (行 i 多想听列 j)
+softmax 前先 /sqrt(head_dim)  (scale: 分数太大容易两极分化)
 上三角 -inf = 不能听未来的      (mask)
 softmax 按行, 行和为 1         (注意力权重)
-out[i] = Σ w_j × v_j          (加权混合, 行向量×矩阵)
+out[i] = sum w_j * v_j        (加权混合, 行向量*矩阵)
 x + out 残差 = 保留原想法      (每层都有直通快车道)
 大计算前 RMSNorm = 先调音量    (数值尺度拉齐)
 FFN 逐行独立 = 回家自己做作业    (行内加工)

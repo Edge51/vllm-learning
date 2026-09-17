@@ -21,6 +21,7 @@ target
 #.idea/
 
 .opencode/
+.sisyphus/
 .vscode/
 
 # Draw.io drafts (not ready for version control)

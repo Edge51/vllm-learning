@@ -1,8 +1,72 @@
 # Phase 5：分布式推理 — 知识地图
 
-> 学习日期: 2026-07-15 ~ 2026-08-02
-> 状态: 全部为"已读（走过一遍）"，**待用户复述验证**。掌握程度未确认，勿当作已学。
-> 阅读覆盖: 组拓扑 ✅ | TP 实现 ✅ | PP ✅ | EP ✅ | AsyncLLM 执行流 ✅ | Mooncake Disagg ✅ | 通信原语（部分）| 配置案例 ❌
+> 学习日期: 2026-07-15 ~ 2026-08-12
+> 状态: 策略层 TP/PP **已复述已验证**（08-12），其余"已读（走过一遍）"，**待用户复述验证**。
+> 阅读覆盖: 组拓扑 ✅ | TP 实现 ✅ **已复述** | PP ✅ **已复述** | EP ✅ | AsyncLLM 执行流 ✅ | Mooncake Disagg ✅ | 通信原语（部分）| 配置案例 ✅（概念层，决策链）| ctypes 绑定+枚举翻译 ✅（08-12）
+> 结构性缺口: **调度层**（1F1B 交错**无需深学**——vLLM 推理无此机制，概念已覆盖）| 通信层原语已闭环（08-12: ctypes/枚举翻译 + 封装层 + Ring 算法）
+> 参考资源: [Ailing Zhang 图解](http://ailzhang.github.io/posts/distributed-compute-in-transformer/) | [王二·并行策略图解](https://wanger-sjtu.github.io/2026-05-11-llm-inference-parallel-strategies/) | [廖维明·llama.py 剖析](https://www.liaoweiming.org/blog/vllm-distributed-inference) | [NVIDIA Megatron Bridge](https://docs.nvidia.com/nemo/megatron-bridge/latest/parallelisms.html) | [vLLM 官方博客](https://vllm.ai/blog/2025-02-17-distributed-inference)
+
+---
+
+## 0. 知识地图总览（2026-08-05 记录）
+
+### 分层结构
+
+```
+为什么分布式推理
+├── 动机层: 单卡放不下(显存墙) / 算不动(带宽墙) / 要吞吐
+│
+├── 策略层: 切什么?            ← 每种策略解决一个"放不下/算不动"
+│   ├── TP  切权重维度(参数)      [已读: 列切/行切 + all-reduce]
+│   ├── PP  切层(深度)           [已读: make_layers + isend/irecv]
+│   ├── EP  切 expert(MoE)       [已读: SparseMoeBlock + all-to-all]
+│   ├── DP  复制模型切 batch      [已读: vLLM 中只为 MoE 服务]
+│   ├── SP  切序列(激活)          [未展开]
+│   ├── CP  切序列(attention 内)  [未展开]
+│   └── 判断标准: 带宽等级决定取舍 (HBM 2TB/s vs NVLink 600GB/s vs IB 25GB/s)
+│
+├── 通信层: 怎么同步?           ← TP 的灵魂
+│   ├── 原语: all-reduce / all-gather / reduce-scatter / all-to-all / p2p
+│   ├── Ring 算法: 为什么总流量 2(p-1)/p 倍
+│   └── 通信原语细读 communication_op.py   [⚠️ 部分读过, 待细读]
+│
+├── 调度层: 怎么编排?           ← PP 的灵魂
+│   ├── micro-batch 流水线(1F1B)
+│   ├── 气泡率公式 (PP-1)/(PP-1+mb)
+│   └── 计算/通信重叠(AsyncIntermediateTensors)  [已读]
+│
+├── 工程层: vLLM 怎么实现?
+│   ├── 组拓扑 5D tensor         [已读: parallel_state.py]
+│   ├── 多卡执行流 collective_rpc→MQ  [已读]
+│   ├── 权重分片 load_weights    [已读: weight_loader/narrow]
+│   ├── KV cache 与 TP 的关系    [已读: 按 head 分片]
+│   └── 多卡配置案例: 实际部署选 TP/PP/EP  [✅ 概念层: 决策链已推, 见 08-12 记录]
+│
+└── 进阶/组合
+    ├── Disaggregated Prefill/Decode (Mooncake)  [已读]
+    ├── 3D 并行组合 TP×PP×DP
+    └── 弹性 EP (elastic_ep/)     [❌ 待学]
+```
+
+### 状态明细
+
+| 层次 | 状态 | 说明 |
+|---|---|---|
+| 动机层 | ✅ | 70B=140GB 已算过，带宽墙已理解 |
+| 策略层 TP | ✅ **已复述已验证** | 列切/行切、配对省通信、每层2次all-reduce |
+| 策略层 PP | ✅ **已复述已验证** | 分层传 hidden_states、isend/irecv、流水线/气泡 |
+| 策略层 EP | ✅ 已读待复述 | all-to-all 路由 |
+| 策略层 SP/CP | ⚠️ 名词见过 | 只在图解博客里看过，未展开 |
+| 通信层 | ✅ **已闭环**（08-12） | 原语语义 + ctypes/枚举翻译 + 封装层 + Ring 算法 2(p-1)/p 已推 |
+| 调度层 | ✅ **概念已闭环**（08-12） | 气泡率✅；PP 采样广播+spec 回退✅；1F1B 确认 vLLM 无此机制，无需深学 |
+| 工程层 | ✅ 大部分 | 配置案例✅（决策链已推） |
+| 进阶 | ⚠️ | Mooncake 读过，elastic_ep 待学 |
+
+### 学习入口建议
+
+1. **通信层深挖**（Ring all-reduce + communication_op.py 细读）→ 补最薄弱的环节（推荐先做）
+2. **配置案例**（实际部署怎么选 TP/PP/EP，用图解博客落地）→ ✅ 已做（08-12 决策链），可回头对照博客验证
+3. **复述验证**（把已读的 TP/PP 用自己的话讲一遍，确认掌握度再往下走）→ ✅ 已做（08-12，TP/PP 已复述通过），待复述剩余项: EP / AsyncLLM 执行流 / Mooncake
 
 ---
 
@@ -127,8 +191,227 @@
 
 ---
 
+### 2026-08-12: 配置决策链（TP×PP×DP 取舍逻辑）
+
+**理解了什么**（从 08-03 的 TP 案例扩展成完整决策链）:
+- **PP 的痛 = 流水线气泡**: 流水线作业，前卡算完才能传后卡，算的时候其他卡空闲 → PP 不宜多（气泡率跟 PP 段数、micro-batch 数有关，1F1B 可优化）
+- **TP 的痛 = 通信开销**: 分工合作，一次计算就要在参与卡之间通信（all-reduce/all-gather），TP 大 → 通信量大且频率高 → TP 也不宜多
+- **两端权衡**: TP大PP小 → 每次计算都高频卡间通信，通信开销大；TP小PP大 → 请求来时前卡计算后卡闲置，计算浪费大
+- **决策链（四步）**:
+  1. 单卡放得下？→ 放得下: TP=1，直接 DP 多副本（如 7B=14GB）
+  2. 放不下 → TP 切权重（列切/行切）
+  3. TP 切到极限还装不下 → PP 切层（层间传 hidden_states）
+  4. 权重放下后剩的卡能放完整副本 → DP 分担请求（副本间不通信，提吞吐）
+  - 特例: EP 只对 MoE 模型存在
+- **关键洞见**: DP 在决策链里排最后 = "用剩下的卡"的自然选择；TP/PP 是"塞下权重"的必须手段，DP 是"最大化吞吐"的加分项
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| PP 为什么不宜多？ | 流水线气泡：后卡要等前卡算完，等待时计算资源空闲 |
+| TP 为什么不宜多？ | 每次计算都要卡间通信，TP 越大通信量/频率越高，带宽成为瓶颈 |
+| 为什么是"权衡"而非"取大"？ | 两个维度的痛点互相独立：TP 痛在通信、PP 痛在空闲，只能取中间平衡 |
+| DP 为什么排决策链最后？ | 它不解决"放不下"，只解决"吞吐不够"；副本间无通信、可随意复制，是最自然的"剩余卡"利用方式 |
+
+**卡点**: 无（顺着 08-03 的 TP 案例自然延伸，全程是自己推出来的）
+
+**下次入口**: ① 通信层深挖（Ring 算法 + communication_op.py）② 1F1B/气泡率公式细算
+
+---
+
+### 2026-08-12: 复述验证 TP/PP（费曼检查点通过）
+
+**验证方式**: 用户用自己的话复述 TP 链路 + PP 链路，AI 确认/精确化，无大错 → 标记"已复述已验证"
+
+**TP 复述（用户版本）**:
+- 切分: w_gate/w_up 列切 + w_down 行切；qkv 列切 + o_proj 列切
+- 关键省通信: 列切输出直接喂行切/列切配对（w_up 列切 → w_down 行切；attention 输出 → o_proj 列切），**中间零通信**
+- 通信: 每层只需 2 次 all-reduce（FFN 一次 + attention 一次）
+- 激活函数（SiLU）逐元素，对分片友好，卡内本地算
+- attention 逐 head 独立 → 这是 TP 能切 head 到不同卡的可行性基础
+- 洞见: o_proj 输出是"部分和/贡献"（partial contribution），最后 all-reduce 合成——"贡献"用词准确 = 真懂
+
+**PP 复述（用户版本）**:
+- 切分: 按 transformer 层切，每卡拥有一部分层（32 层 ÷ PP=4 → 每卡 8 层）
+- isend/irecv: 传递**卡内最后一层的输出**（hidden_states），不是权重；只有层边界（7→8 层）跨卡
+- 异步点对点: 发方算完立刻丢出不等对方收 → 流水能流起来的通信基础
+- 流水线: 卡0 算完立刻接任务2，任务首尾相接，不空等
+- 代价: 任务1到达卡3 前卡3 空等 = 气泡
+
+**TP vs PP 本质区别（用户自推）**:
+
+| | TP | PP |
+|---|---|---|
+| 切什么 | 矩阵（权重维度） | transformer 层（深度） |
+| 每卡算 | 同一层的部分（列分片/部分和） | 完整的前 N 层 |
+| 通信内容 | 部分和/分片 → all-reduce 合成 | 完整激活（hidden_states 移交） |
+| 通信语义 | 算完要合并 | 算完就移交 |
+
+**卡点**: 无。中间省 all-gather 是用户自己推出来的（"这个是你自己搞定的"）
+
+**下次入口**: ① 通信层深挖（Ring 算法 + communication_op.py）② 1F1B/气泡率公式细算
+
+---
+
+### 2026-08-12: 通信层第一块基石 — ctypes 绑定与操作符枚举翻译
+
+**理解了什么**（从 `ReduceOp.SUM: RedOpType = ...` 这个写法切入）:
+- `SUM: RedOpType = ...` 是 **.pyi 类型桩**写法：Ellipsis = "值不重要，类型才重要"，是给类型检查器看的接口声明，真身是 C++ 扩展（`torch/_C/_distributed_c10d.pyi:124`）
+- **vLLM 的 ncclRedOpTypeEnum 是真值表**（`pynccl_wrapper.py:117`）：`ncclSum = 0` 直接给真实 int
+- **ctypes 绑定**: `Function` dataclass（name/restype/argtypes）= C 函数签名表；`ncclRedOp_t = ctypes.c_int`（114 行）告诉 ctypes "这个参数是 int"
+- **完整调用链**:
+  ```
+  调用方: dist.all_reduce(tensor, op=ReduceOp.SUM)   ← torch C++ 枚举对象
+    → pynccl.py: all_reduce(op 入参)
+    → ncclRedOpTypeEnum.from_torch(op)              ← 翻译: torch语义 → int(ncclSum=0)
+    → self.ncclAllReduce(..., op=int, ...)          ← ctypes 按 argtypes[4]=ncclRedOp_t 打包
+    → libnccl.so: ncclAllReduce(..., ncclRedOp_t op) ← C 拿到 int 枚举
+  ```
+- **本质**: Python 世界（ReduceOp 对象）→ ctypes 边界（int）→ C 世界（ncclRedOp_t）；ctypes 是桥，from_torch 是换货币
+- **为什么不能 int(op) 硬转**: torch.ReduceOp 和 ncclSum 是两套不同代码的枚举约定，数值不能假设相同，必须显式映射
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| `SUM: RedOpType = ...` 三个点啥意思？ | Ellipsis 字面量，stub 里表示"值不重要，类型才重要"——声明存在 + 类型，真值在 C++ |
+| 为什么 from_torch 要做转换？ | ctypes 函数签名要求 int（ncclRedOp_t），torch 给的是 C++ 枚举对象，必须翻译 |
+| ncclRedOpTypeEnum 为什么有真值？ | 它是 vLLM 自己写的 Python 枚举（真值表），torch 是桩，两者风格不同 |
+
+**卡点**: 无（顺着好奇心菜单的源码问题自然深入，全程自己读代码+自己串链路）
+
+**后续补充（同 session）— 封装层真相**:
+- `communication_op.py` 的 5 个函数 = **薄转发器**，每个就一行，无 backend 逻辑:
+  ```python
+  def tensor_model_parallel_all_reduce(input_):
+      return get_tp_group().all_reduce(input_)   # 模型 → TP 组对象
+  ```
+- **分层真相**:
+  ```
+  模型层:   tensor_model_parallel_gather(input_, dst)        ← 转发器
+  寻址层:   get_tp_group().gather(input_, dst, dim)          ← 拿 TP 组
+  实现层:   GroupCoordinator.gather → device_communicator.gather
+  翻译层:   dst=self.ranks[dst]                              ← 组内位置 → 全局 rank
+  后端:     torch.distributed.gather(dst=全局rank, group=device_group)
+  引擎:     libnccl.so
+  ```
+- **纠偏**: "字符串 nccl"（ray_communicator.py:255 `get_transport_name()`）是**结果汇报**（告诉 Mooncake 用 NCCL 传输），不是后端选择开关；真正的 backend 在 torch.distributed group（`dist.get_backend`），vLLM 侧只有断言校验（pynccl.py:78 等）
+- **正反馈**: `self.ranks[dst]` 是用户 08-05 学的，今天无提示复述出来 → 确认真记住
+
+**下次入口**: ① 通信层继续: Ring 算法（all-reduce 为什么 2(p-1)/p 流量）② communication_op.py 已完 ③ 1F1B
+
+---
+
+### 2026-08-12: Ring all-reduce 算法推导（用户自己推出公式）
+
+**理解了什么**（全程用户自推）:
+- **核心直觉（用户猜的）**: 每张卡给相邻一个方向的卡传数据，接收方叠加 → 单向环累加
+- **关键缺口发现**: 只转一圈 = 只完成 reduce-scatter（每卡拿到自己那份总和），**还差 all-gather 阶段**（把每份总和分发到所有卡）
+- **公式推导（用户推的）**:
+  ```
+  reduce-scatter: 每卡转 p-1 轮 × p 卡 = (p-1)p 次传输
+  all-gather:     再 (p-1)p 次
+  总传输 = 2(p-1)p 份
+  总数据 = p² 份（p 卡 × p 份）
+  流量 = 2(p-1)p / p² = 2(p-1)/p
+  ```
+- **公式物理含义**:
+  | 部分 | 含义 |
+  |---|---|
+  | 2 | 两个阶段（reduce-scatter + all-gather） |
+  | p-1 | 环上自己不传给自己，转 p-1 轮 |
+  | /p | 数据切 p 份，每轮只传 1/p |
+- **边界验证**: p=2 → 1 倍（两卡互传，总数据口径 1/2+1/2）；p→∞ → 2 倍（永不爆炸）
+- **对比价值**: 朴素中心化 = (p-1) 倍（每卡直连所有卡，随卡数爆炸）；Ring = 最多 2 倍 → **通信量有界**
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| 为什么"转一圈"不够？ | 转一圈只完成 reduce-scatter（每卡只有自己那份总和），要让所有卡都拿到全部总和需要第二个阶段 all-gather |
+| p 是什么？ | 参与 all-reduce 的卡数（rank 数） |
+| 为什么流量永远 1~2 倍？ | 2(p-1)/p 随 p 增大趋近 2，但永不超 2——这就是 Ring 相对中心化 (p-1) 倍的核心优势 |
+
+**卡点**: 无。初猜"12 次完成"漏了 all-gather 半程——被引导后自己发现缺口并推出完整公式
+
+**下次入口**: ① EP 复述验证 ② SP/CP 展开 ③ 1F1B 具体调度实现（气泡率已推导✅）
+
+---
+
+### 2026-08-12: 流水线气泡率推导（用户自己推出公式）
+
+**理解了什么**（全程用户自推，PP=4 / mb=4 模型）:
+- **总耗时** = (PP-1) 启动延迟 + mb 计算 = 3+4 = 7 个时间单位（每卡算一个 mb 用 1 单位）
+- **卡3（末卡）空闲** = 前 3 格（等任务流过来）
+- **气泡率** = 空闲/总耗时 = 3/7 = **(PP-1)/(PP-1+mb)**
+- **气泡的对称性（用户自己发现的漂亮性质）**:
+  | 卡 | 启动气泡(head) | 收尾气泡(tail) | 总空闲 |
+  |---|---|---|---|
+  | 卡0 | 0 | 3 | **3** |
+  | 卡1 | 1 | 2 | **3** |
+  | 卡2 | 2 | 1 | **3** |
+  | 卡3 | 3 | 0 | **3** |
+  → 每张卡总空闲都是 PP-1，气泡总量守恒，只是"位置"不同（前卡闲在收尾、后卡闲在启动）→ **气泡是流水线的结构性浪费，不是某张卡的局部问题**
+- **mb 的作用**（衔接 1F1B 的钥匙）: 气泡率 = (PP-1)/(PP-1+mb)，mb 越大气泡率越小:
+  - mb=1: 3/4 = 75%（灾难）
+  - mb=4: 3/7 ≈ 43%
+  - mb→∞: → 0（流水线满负荷）
+  → **这就是 PP 需要 micro-batch 流水线调度（1F1B）的原因**：用足够多的 mb 把气泡压下去
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| 什么是气泡？ | 流水线中卡空闲的时间：启动阶段后卡等任务、收尾阶段前卡等后卡 |
+| 气泡率公式怎么来的？ | 总耗时 (PP-1)+mb，空闲 PP-1（每卡总空闲守恒），相除即得 |
+| 为什么需要 1F1B？ | mb 越大气泡率越小，1F1B 用微批次交错把流水线填满 |
+
+**卡点**: 无。对称性表格是用户自己排出来的
+
+**下次入口**: ① 1F1B 具体调度（schedule 怎么交错 micro-batch，vllm 代码）② EP 复述验证 ③ SP/CP 展开
+
+---
+
+### 2026-08-12: PP 采样广播与 spec decode 回退（scheduler 层）
+
+**入口**: `vllm/v1/worker/gpu/pp_utils.py`（41 行）+ `model_runner.py` sample_tokens / postprocess + `scheduler.py` 回退逻辑
+
+**理解了什么**:
+- **pp_utils.py 是"末卡采样结果广播"，不是层间 isend/irecv**:
+  - `pp_broadcast`: 仅末卡调用（`assert is_last_rank`），把 sampled_token_ids + num_sampled/num_rejected 广播给全 PP 组
+  - `pp_receive`: 非末卡调用（`assert not is_last_rank`），接收末卡广播
+  - **为什么用 broadcast 不是 isend/irecv**: hidden_states 是"只给下一卡"（点对点）；采样结果是"所有卡都要"（调度器跑在每个 rank 上，都要推进 step）
+- **num_sampled/num_rejected 的真实语义**（用户直觉对了一半）:
+  | 场景 | num_sampled | num_rejected |
+  |---|---|---|
+  | 普通解码（无 draft）| 1 | 0 |
+  | spec decode（提议 N 个）| 接受数（可 >1）| N - 接受数（可同时非零）|
+  | chunked prefill | 0 | 0 |
+  - `max_sample_len = num_speculative_steps + 1`（model_runner.py:1171）→ spec decode 一次提议多 token 的证据
+  - 分支: `num_draft_tokens == 0` → 普通 sampler；否则 → rejection_sampler（890-903）
+- **回退（rollback）不是重算**（用户最初的表述被精确化）:
+  - scheduler.py:1370-1384: `num_rejected = num_draft_tokens - num_accepted`；`request.num_computed_tokens -= num_rejected`；`num_output_placeholders -= num_rejected`
+  - **语义**: 被接受的 draft 正常进 KV cache（不重算），被拒绝的**回退指针**（num_computed_tokens 减回去），下次调度从最后接受的位置继续
+  - 被拒绝的 draft 的 KV cache = **无效 spec token**（`num_invalid_spec_tokens`），算了但没用 → 浪费
+- **PP 为什么必须广播采样结果**（用户自推）: 调度器跑在每个 rank 上，采样只在末卡 → 所有 rank 都要知道"白算了几格"才能各自更新 KV cache 分配、保持 token 位置一致
+
+**疑问与解答**:
+
+| Q | A |
+|---|-----|
+| pp_broadcast 传的 sample_token_ids 是采样结果吗？ | 是——末卡最后一层采样出的最终 token |
+| 为什么普通解码 num_sampled 永远是 1？ | 每序列每步只采 1 个 token，无 draft |
+| 两个计数什么时候同时非零？ | spec decode：提议 4 接受 2 → sampled=2, rejected=2 |
+| 被拒绝的 token 怎么处理？ | 不是重算，是回退指针：num_computed_tokens -= num_rejected，KV cache 位置作废 |
+
+**卡点**: 无。用户自己发现"普通解码应该 1/0"的疑点 → 追代码发现 spec decode 场景两个计数可同时非零
+
+**下次入口**: ① 1F1B 具体调度交错（scheduler PP 段 micro-batch 编排）② EP 复述验证 ③ SP/CP 展开
+
 ## 目录
 
+0. [知识地图总览](#0-知识地图总览2026-08-05-记录)
 1. [组拓扑（5D tensor 分组）](#1-组拓扑5d-tensor-分组)
 2. [Tensor Parallel（TP）](#2-tensor-paralleltp)
 3. [Pipeline Parallel（PP）](#3-pipeline-parallelpp)
@@ -256,6 +539,69 @@ Y = [X₁ | X₂ | ... | Xₚ]·B
 | all-reduce | 2× 数据量 | 行切后合并部分和 |
 | reduce-scatter | 1× 数据量 | 各卡求和后每人拿自己那份（序列并行） |
 | all-gather | 1× 数据量 | 列切后拼接完整输出 |
+
+**列切 vs 行切 → all-gather vs all-reduce（2026-08-05 自己推导，非 AI 讲解）**
+
+为什么不能互换——用 2×2 例子钉死：
+
+```
+列切 → all-gather（拼接）
+  W 按列切: Y = X·[W_L | W_R]
+    卡0: X·W_L = (1,2)  ← Y 的左半段
+    卡1: X·W_R = (1,2)  ← Y 的右半段
+  拼起来 = (1,4) 完整 Y
+  每卡片段互相独立、合起来才完整 → 拼接
+
+行切 → all-reduce（求和）
+  W 按行切: Y = [X_T | X_B]·[W_T; W_B]
+    卡0: X_T·W_T = (1,4)  ← 完整形状，但是"部分和"
+    卡1: X_B·W_B = (1,4)  ← 完整形状，但是"部分和"
+  Y = 部分和0 + 部分和1 → 逐元素相加
+  每卡都是完整形状向量，但每位置只有部分贡献 → 同位置相加
+```
+
+一句话：**all-gather 处理"互不重叠的片段"（拼起来），all-reduce 处理"互相重叠的贡献"（加起来）。语义不同，不能互换。**
+
+### 通信原语细读（2026-08-10 用户读代码闭环 ✅）
+
+`vllm/distributed/communication_op.py`（43 行）——**薄壳转发层**，5 个函数全是转发：
+
+```python
+def tensor_model_parallel_all_reduce(input_):
+    return get_tp_group().all_reduce(input_)   # 真正的实现在 GroupCoordinator
+```
+
+**4 个原语的完整语义**（用户对比推导）:
+
+| 操作 | 数据流向 | 谁拿结果 | 通信量 |
+|------|---------|---------|--------|
+| all_reduce | 多对多 | 所有人拿完整和 | 2× 数据量（每人拿全量，有 N-1 份浪费） |
+| all_gather | 多对多 | 所有人拿完整拼接 | 1× 数据量 |
+| reduce_scatter | 多对多 | 每人拿"和的 1/N 块" | 1× 数据量（= reduce+scatter，省 all-reduce 的浪费） |
+| gather | **多对一** | **只有 dst 拿完整** | 收集到 dst |
+
+- reduce_scatter 误区：不是"分享给指定的人"，是 **reduce 后按维切块、每人拿自己那块**（all-reduce 的省通信版本）
+- gather vs all_gather 只差一个 dst：gather 只有 dst 拿全量，all_gather 所有人拿全量
+- 用途：gather 用于 logits 最终收集（`logits_processor.py:86`）——采样只要一份完整 logits，多对一即可；TPU 不支持 gather 原语时退化为 all_gather
+
+**local_rank vs global_rank（用户疑问闭环）**:
+
+```
+gather(input_, dst=local_rank)          ← 接口层: 组内语义（"TP 组里第几个"）
+  ↓ self.ranks[dst]                     ← 查表: local_rank → global rank
+torch.distributed.gather(..., dst=global_rank)   ← 实现层: NCCL 要全局 rank
+```
+
+- `self.ranks` = "组内位置 → 全局 rank"映射表（base_device_communicator.py:151/158）
+- 接口层故意暴露 local_rank（组内语义）：调用方不需要知道自己在全局是几号，也不需要关心 TP 组跨不跨节点
+- dst = "我去哪"（目标位置索引）；rank_in_group = "我是谁"（自己的位置）——语义不同，不能混用
+
+**多层封装链**:
+```
+communication_op.py (薄壳) → GroupCoordinator (parallel_state.py:1221 get_tp_group)
+→ DeviceCommunicatorBase.gather (base_device_communicator.py:255)
+→ torch.distributed.gather (NCCL)
+```
 
 ### 相关代码
 
