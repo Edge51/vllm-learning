@@ -4,7 +4,6 @@
 [submodule "third_party/vllm"]
 	path = third_party/vllm
 	url = https://github.com/vllm-project/vllm.git
-[submodule "third_party/vllm-cloud-main"]
-	path = third_party/vllm-cloud-main
-	url = https://github.com/huaweicloud/ModelArts-Lab.git
-	branch = vllm/vllm-cloud-main
+[submodule "third_party/vllm-cloud"]
+	path = third_party/vllm-cloud
+	url = https://gitcode.com/InferTurbo/vllm-cloud.git
