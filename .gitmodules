@@ -7,3 +7,6 @@
 [submodule "third_party/vllm-cloud"]
 	path = third_party/vllm-cloud
 	url = https://gitcode.com/InferTurbo/vllm-cloud.git
+[submodule "third_party/ops-transformer"]
+	path = third_party/ops-transformer
+	url = https://gitcode.com/cann/ops-transformer.git
